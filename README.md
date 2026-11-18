@@ -157,3 +157,25 @@ xvfb-run -a dbus-run-session -- make test
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+## Fedora packaging
+
+`parcel.spec` builds the RPM. It needs a `v0.2.0` tag on GitHub,
+because `Source0` is the release tarball for that tag.
+
+Build it locally, in a Fedora container (no sudo needed on the host):
+
+```sh
+podman run --rm -v "$PWD:/work:z" fedora:45 bash -c '
+  dnf -y install rpm-build rpmdevtools make desktop-file-utils libappstream-glib python3-pytest python3-gobject python3-rpm gtk4 libadwaita PackageKit-glib xorg-x11-server-Xvfb dbus-daemon
+  spectool -g -R /work/parcel.spec
+  rpmbuild -ba /work/parcel.spec'
+```
+
+Or submit the built source RPM to COPR, which builds it on Fedora infra
+and hosts a repo that dnf can use:
+
+```sh
+dnf copr enable yzraeu/parcel
+dnf install parcel
+```

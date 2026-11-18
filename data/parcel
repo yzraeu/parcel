@@ -1,0 +1,21 @@
+#!/usr/bin/python3
+"""Launcher for Parcel: find the installed parcel/ package and run it.
+
+The package lives in share/parcel/ next to this script's bin/ directory,
+so this works for a system install (/usr) and a user install (~/.local).
+"""
+import os
+import sys
+
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+        "share",
+        "parcel",
+    ),
+)
+
+from parcel.app import main
+
+raise SystemExit(main())
