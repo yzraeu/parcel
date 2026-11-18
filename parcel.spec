@@ -63,7 +63,12 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/dev.izzy.parcel.deskt
 appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/dev.izzy.parcel.metainfo.xml
 
 %check
-xvfb-run -a dbus-run-session -- make test
+# Headless Xvfb has no working GL in the mock buildroot: presenting a window
+# makes GSK's GL renderer abort in libepoxy (COPR build 11349732), even
+# though mesa-dri-drivers is installed. Run the suite with the software
+# cairo renderer instead. The tests still present every dialog and assert
+# on it; only the rendering backend changes.
+GSK_RENDERER=cairo xvfb-run -a dbus-run-session -- make test
 
 %files -f %{pyproject_files}
 %{_bindir}/parcel
