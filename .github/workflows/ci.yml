@@ -15,6 +15,7 @@ jobs:
         run: >
           dnf install -y
           make
+          make
           python3-pytest
           ruff
           python3-gobject
