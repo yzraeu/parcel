@@ -22,8 +22,6 @@ BuildRequires:  libadwaita
 BuildRequires:  PackageKit-glib
 BuildRequires:  xorg-x11-server-Xvfb
 BuildRequires:  dbus-daemon
-BuildRequires:  pyproject-rpm-macros
-BuildRequires:  python3-devel
 
 Requires:       python3
 Requires:       python3-gobject
