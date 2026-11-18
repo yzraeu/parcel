@@ -64,6 +64,7 @@ appstream-util validate-relax --nonet %{buildroot}%{_datadir}/metainfo/dev.izzy.
 xvfb-run -a dbus-run-session -- make test
 
 %files -f %{pyproject_files}
+%{_bindir}/parcel
 %license LICENSE
 %doc README.md
 %{_datadir}/applications/dev.izzy.parcel.desktop
