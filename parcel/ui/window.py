@@ -10,10 +10,12 @@ import gi
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, GObject, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GObject, Gtk  # noqa: E402
 
+from parcel import APP_NAME  # noqa: E402
 from parcel.backend.models import Package, Repo, RepoPlan, RepoRequest, Update  # noqa: E402
 from parcel.ui import tasks  # noqa: E402
+from parcel.ui.about import show_about  # noqa: E402
 from parcel.ui.confirm_dialog import build_remove_dialog  # noqa: E402
 from parcel.ui.package_list import PackageListPage  # noqa: E402
 from parcel.ui.package_row import RowAction  # noqa: E402
@@ -91,6 +93,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._updates: list[Update] = []
         self.remove_dialog: Adw.AlertDialog | None = None
         self.add_repo_dialog: AddRepoDialog | None = None
+        self.about_dialog: Adw.AboutDialog | None = None
 
         self.stack = Adw.ViewStack()
         self.search_entry = Gtk.SearchEntry(placeholder_text="Search packages")
@@ -114,6 +117,18 @@ class MainWindow(Adw.ApplicationWindow):
             stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE
         )
         self.header.set_title_widget(self.view_switcher)
+
+        menu = Gio.Menu()
+        menu.append(f"About {APP_NAME}", "win.about")
+        self.menu_button = Gtk.MenuButton(
+            icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Main Menu"
+        )
+        self.menu_button.update_property([Gtk.AccessibleProperty.LABEL], ["Main Menu"])
+        self.header.pack_end(self.menu_button)
+
+        about_action = Gio.SimpleAction.new("about", None)
+        about_action.connect("activate", self._show_about)
+        self.add_action(about_action)
 
         self.toast_overlay = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
@@ -370,3 +385,6 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _show_toast(self, message: str) -> None:
         self.toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))
+
+    def _show_about(self, *_args: object) -> None:
+        self.about_dialog = show_about(self)

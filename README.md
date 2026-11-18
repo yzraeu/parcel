@@ -5,8 +5,9 @@ box, one button per action. No app-store features: that is GNOME Software's
 job.
 
 Status: **v0.2.0 repo management**. Browse, search, install, remove, and update
-real packages through PackageKit, with a detail view for every package, plus a
-Repos tab that adds, removes, enables, and disables repositories.
+real packages through PackageKit, with a detail view for every package, a
+Repos tab that adds, removes, enables, and disables repositories, and an
+About dialog reachable from the header menu.
 
 ## Features
 
@@ -32,6 +33,8 @@ Repos tab that adds, removes, enables, and disables repositories.
   confirmation before the key is trusted and the repo is written. The COPR
   path runs `dnf copr enable` when the plugin is there and falls back to
   writing the `.repo` file plus importing the key.
+- **About Parcel** (header menu): app name, version, developer, website and
+  issue links, copyright, the GPL-3.0 license, and the dependency credits.
 - **Package detail** (tap a row): description, license, size, repository,
   architecture, install date, install reason (installed by you vs installed
   as a dependency), reverse dependencies, the installed file list (first few
@@ -62,6 +65,7 @@ parcel/                     # app package
   ui/                       # GTK views, never calls PackageKit or a shell
     __init__.py
     window.py               # header bar, search, tabs, actions, toasts
+    about.py                # About dialog: version, links, credits
     package_list.py         # virtualized list page with filtering
     updates_page.py         # Updates tab with Update all
     package_row.py          # one row: name, subtitle, action, expander

@@ -178,6 +178,33 @@ def test_window_has_the_four_tabs() -> None:
         assert window.stack.get_page(page).get_title() == title
 
 
+def test_header_has_the_main_menu_with_an_about_entry() -> None:
+    window = make_window()
+
+    assert window.menu_button.get_icon_name() == "open-menu-symbolic"
+    assert window.menu_button.get_tooltip_text() == "Main Menu"
+    model = window.menu_button.get_menu_model()
+    assert model.get_n_items() == 1
+    label = model.get_item_attribute_value(0, "label", None)
+    assert label is not None
+    assert label.get_string() == "About Parcel"
+    action = model.get_item_attribute_value(0, "action", None)
+    assert action is not None
+    assert action.get_string() == "win.about"
+
+
+def test_about_action_presents_the_about_dialog() -> None:
+    window = make_window()
+    action = window.lookup_action("about")
+
+    assert action is not None
+    action.activate(None)
+
+    assert window.about_dialog is not None
+    assert window.about_dialog.get_application_name() == "Parcel"
+    assert window.about_dialog.get_visible()
+
+
 def test_three_tabs_are_package_lists_and_repos_is_its_own_page() -> None:
     window = make_window()
 
