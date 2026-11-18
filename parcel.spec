@@ -13,6 +13,7 @@ BuildRequires:  desktop-file-utils
 BuildRequires:  libappstream-glib
 BuildRequires:  make
 BuildRequires:  python3-devel
+BuildRequires:  python3-hatchling
 BuildRequires:  pyproject-rpm-macros
 BuildRequires:  python3-pytest
 BuildRequires:  python3-gobject
