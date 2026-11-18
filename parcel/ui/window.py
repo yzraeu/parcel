@@ -1,8 +1,9 @@
-"""Main window: header bar, search, tab switcher, and the four pages."""
+"""Main window: header bar, search, the four tabs, and package actions."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Protocol
 
 import gi
 
@@ -11,10 +12,14 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GObject, Gtk  # noqa: E402
 
-from parcel.backend.models import Package  # noqa: E402
-from parcel.ui import placeholder  # noqa: E402
-from parcel.ui.package_row import PackageRow, RowAction  # noqa: E402
+from parcel.backend.models import Package, Update  # noqa: E402
+from parcel.ui import tasks  # noqa: E402
+from parcel.ui.confirm_dialog import build_remove_dialog  # noqa: E402
+from parcel.ui.package_list import PackageListPage  # noqa: E402
+from parcel.ui.package_row import RowAction  # noqa: E402
 from parcel.ui.repos_view import build_repos_view  # noqa: E402
+from parcel.ui.size_loader import SizeLoader  # noqa: E402
+from parcel.ui.updates_page import UpdatesPage  # noqa: E402
 
 PAGE_TITLES = {
     "installed": "Installed",
@@ -23,20 +28,59 @@ PAGE_TITLES = {
     "repos": "Repos",
 }
 
+# Toast wording per action: in progress, finished, and the verb on failure.
+_ACTION_WORDS = {
+    RowAction.INSTALL: ("Installing", "Installed", "install"),
+    RowAction.REMOVE: ("Removing", "Removed", "remove"),
+    RowAction.UPDATE: ("Updating", "Updated", "update"),
+}
+
+
+class PackageBackend(Protocol):
+    """The slice of the backend client the window needs.
+
+    Keeping it explicit documents the seam: the UI never imports PackageKit.
+    """
+
+    def catalog(self) -> tuple[list[Package], list[Package]]: ...
+
+    def list_updates(
+        self, installed_versions: Mapping[str, str] | None = None
+    ) -> list[Update]: ...
+
+    def get_detail(self, package: Package) -> Package: ...
+
+    def sizes(self, packages: Sequence[Package]) -> Mapping[str, int]: ...
+
+    def install(self, package: Package) -> None: ...
+
+    def remove(self, package: Package) -> None: ...
+
+    def update(self, packages: Sequence[Package]) -> None: ...
+
 
 class MainWindow(Adw.ApplicationWindow):
     """Parcel's only window at this stage."""
 
-    def __init__(self, **kwargs: object) -> None:
+    def __init__(
+        self,
+        client: PackageBackend,
+        runner: tasks.Runner | None = None,
+        **kwargs: object,
+    ) -> None:
         super().__init__(
             title="Parcel",
             default_width=1000,
             default_height=720,
             **kwargs,
         )
-        self.rows: dict[str, list[PackageRow]] = {}
-        self.stack = Adw.ViewStack()
+        self.client = client
+        self._runner = runner if runner is not None else tasks.AsyncRunner()
+        self._size_loader = SizeLoader(client.sizes, self._runner)
+        self._updates: list[Update] = []
+        self.remove_dialog: Adw.AlertDialog | None = None
 
+        self.stack = Adw.ViewStack()
         self.search_entry = Gtk.SearchEntry(placeholder_text="Search packages")
         self.search_bar = Gtk.SearchBar()
         self.search_bar.set_child(self.search_entry)
@@ -52,120 +96,178 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self.search_toggle.set_active(True)
 
-        header = Adw.HeaderBar()
-        header.pack_start(self.search_toggle)
-        header.set_title_widget(
-            Adw.ViewSwitcher(stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE)
+        self.header = Adw.HeaderBar()
+        self.header.pack_start(self.search_toggle)
+        self.view_switcher = Adw.ViewSwitcher(
+            stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE
         )
+        self.header.set_title_widget(self.view_switcher)
 
         self.toast_overlay = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
-        toolbar.add_top_bar(header)
+        toolbar.add_top_bar(self.header)
         toolbar.add_top_bar(self.search_bar)
         toolbar.set_content(self.stack)
         self.toast_overlay.set_child(toolbar)
         self.set_content(self.toast_overlay)
 
-        self._add_package_page(
-            "installed",
-            placeholder.installed(),
+        self.installed_page = PackageListPage(
             RowAction.REMOVE,
-            "system-software-install-symbolic",
+            self._handle_action,
+            self._expand,
+            self._size_loader,
+            empty_title="No packages installed",
+            empty_description="PackageKit reports an empty package set.",
         )
-        self._add_package_page(
-            "available",
-            placeholder.available(),
+        self.available_page = PackageListPage(
             RowAction.INSTALL,
-            "package-x-generic-symbolic",
+            self._handle_action,
+            self._expand,
+            self._size_loader,
+            empty_title="No packages available",
+            empty_description="No repositories offer packages right now.",
         )
-        self._add_updates_page()
+        self.updates_page = UpdatesPage(
+            self._handle_action,
+            self._expand,
+            self._update_all,
+            self._size_loader,
+        )
+        self.pages: dict[str, PackageListPage] = {
+            "installed": self.installed_page,
+            "available": self.available_page,
+            "updates": self.updates_page,
+        }
+        icons = {
+            "installed": "system-software-install-symbolic",
+            "available": "package-x-generic-symbolic",
+            "updates": "software-update-available-symbolic",
+        }
+        for name, page in self.pages.items():
+            self.stack.add_titled_with_icon(page, name, PAGE_TITLES[name], icons[name])
         self.stack.add_titled_with_icon(
             build_repos_view(), "repos", PAGE_TITLES["repos"], "folder-symbolic"
         )
 
         self.search_entry.connect("search-changed", self._on_search_changed)
+        self.stack.connect("notify::visible-child-name", self._on_page_changed)
 
-    def _add_package_page(
-        self,
-        name: str,
-        packages: Sequence[Package],
-        action: RowAction,
-        icon_name: str,
-    ) -> None:
-        self._add_rows_page(
-            name,
-            packages,
-            action,
-            icon_name,
-            version_text=None,
-        )
+        self._load()
 
-    def _add_updates_page(self) -> None:
-        updates = placeholder.updates()
-        rows: list[PackageRow] = []
-        group = Adw.PreferencesGroup()
-        for update in updates:
-            row = PackageRow(
-                update.package,
-                action=RowAction.UPDATE,
-                on_action=self._make_action_handler(RowAction.UPDATE),
-                version_text=update.version_text,
-            )
-            rows.append(row)
-            group.add(row)
-        page = Adw.PreferencesPage()
-        page.add(group)
-        self.rows["updates"] = rows
-        self.stack.add_titled_with_icon(
-            page,
-            "updates",
-            PAGE_TITLES["updates"],
-            "software-update-available-symbolic",
-        )
+    # -- loading -----------------------------------------------------------
 
-    def _add_rows_page(
-        self,
-        name: str,
-        packages: Sequence[Package],
-        action: RowAction,
-        icon_name: str,
-        version_text: str | None,
-    ) -> None:
-        rows = []
-        group = Adw.PreferencesGroup()
-        for package in packages:
-            row = PackageRow(
-                package,
-                action=action,
-                on_action=self._make_action_handler(action),
-                version_text=version_text,
-            )
-            rows.append(row)
-            group.add(row)
-        page = Adw.PreferencesPage()
-        page.add(group)
-        self.rows[name] = rows
-        self.stack.add_titled_with_icon(page, name, PAGE_TITLES[name], icon_name)
+    def _load(self) -> None:
+        for page in self.pages.values():
+            page.set_loading(True)
+        self._runner.run(self._fetch, self._loaded, self._load_failed)
 
-    def _make_action_handler(self, action: RowAction) -> Callable[[Package], None]:
-        def handle(package: Package) -> None:
-            self._on_row_action(package, action)
+    def _fetch(self) -> tuple[list[Package], list[Package], list[Update]]:
+        installed, available = self.client.catalog()
+        versions = {package.name: package.version for package in installed}
+        updates = self.client.list_updates(versions)
+        return installed, available, updates
 
-        return handle
+    def _loaded(self, data: tuple[list[Package], list[Package], list[Update]]) -> None:
+        installed, available, updates = data
+        self._updates = list(updates)
+        self.installed_page.set_packages(installed)
+        self.available_page.set_packages(available)
+        self.updates_page.set_updates(updates)
+        for page in self.pages.values():
+            page.set_loading(False)
+        self.stack.get_page(self.updates_page).set_badge_number(len(updates))
+        self._apply_search_to_current()
 
-    def apply_filter(self, query: str) -> None:
-        """Show only rows matching ``query`` in every tab."""
-        for rows in self.rows.values():
-            for row in rows:
-                row.set_visible(row.matches(query))
+    def _load_failed(self, error: Exception) -> None:
+        for page in self.pages.values():
+            page.set_loading(False)
+        self._show_toast(f"Could not load packages: {error}")
+
+    # -- search ------------------------------------------------------------
 
     def _on_search_changed(self, _entry: Gtk.SearchEntry) -> None:
-        self.apply_filter(self.search_entry.get_text())
+        self._apply_search_to_current()
 
-    def _on_row_action(self, package: Package, action: RowAction) -> None:
-        self._show_toast(
-            f"{action.label} {package.name} is not available in this build."
+    def _on_page_changed(self, *_args: object) -> None:
+        self._apply_search_to_current()
+
+    def _current_page(self) -> PackageListPage | None:
+        return self.pages.get(self.stack.get_visible_child_name() or "")
+
+    def _apply_search_to_current(self) -> None:
+        page = self._current_page()
+        if page is not None:
+            page.set_filter(self.search_entry.get_text())
+
+    # -- actions -----------------------------------------------------------
+
+    def _handle_action(self, package: Package, action: RowAction) -> None:
+        words = _ACTION_WORDS[action]
+        if action is RowAction.REMOVE:
+            self._confirm_remove(package)
+        elif action is RowAction.INSTALL:
+            self._run(package, words, lambda: self.client.install(package))
+        elif action is RowAction.UPDATE:
+            self._run(
+                package,
+                words,
+                lambda: self.client.update([package]),
+            )
+
+    def _confirm_remove(self, package: Package) -> None:
+        dialog = build_remove_dialog(
+            package,
+            lambda: self._run(
+                package,
+                _ACTION_WORDS[RowAction.REMOVE],
+                lambda: self.client.remove(package),
+            ),
         )
+        self.remove_dialog = dialog
+        dialog.present(self)
+
+    def _update_all(self) -> None:
+        packages = [update.package for update in self._updates]
+        if not packages:
+            return
+        self._run(
+            None,
+            _ACTION_WORDS[RowAction.UPDATE],
+            lambda: self.client.update(packages),
+            target="all packages",
+        )
+
+    def _expand(
+        self,
+        package: Package,
+        show_detail: Callable[[Package], None],
+    ) -> None:
+        def failed(error: Exception) -> None:
+            self._show_toast(f"Could not load details for {package.name}: {error}")
+            # Show what the list already knows instead of leaving a spinner up.
+            show_detail(package)
+
+        self._runner.run(lambda: self.client.get_detail(package), show_detail, failed)
+
+    def _run(
+        self,
+        package: Package | None,
+        words: tuple[str, str, str],
+        operation: Callable[[], None],
+        target: str | None = None,
+    ) -> None:
+        busy, done, verb = words
+        name = target or (package.name if package is not None else "packages")
+        self._show_toast(f"{busy} {name}\u2026")
+        self._runner.run(
+            operation,
+            lambda _result: self._transaction_done(done, name),
+            lambda error: self._show_toast(f"Could not {verb} {name}: {error}"),
+        )
+
+    def _transaction_done(self, done: str, target: str) -> None:
+        self._show_toast(f"{done} {target}")
+        self._load()
 
     def _show_toast(self, message: str) -> None:
         self.toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))

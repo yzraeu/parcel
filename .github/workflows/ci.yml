@@ -18,6 +18,7 @@ jobs:
           python3-pytest
           ruff
           python3-gobject
+          python3-rpm
           gtk4
           libadwaita
           PackageKit-glib

@@ -49,6 +49,28 @@ def test_size_text_uses_format_size() -> None:
     assert make_package(size=1024**2).size_text == "1.0 MiB"
 
 
+def test_unknown_size_is_not_shown_as_zero_bytes() -> None:
+    assert make_package(size=0).size_text == "unknown"
+
+
+def test_repo_label_shortens_copr_repositories() -> None:
+    assert (
+        make_package(repo="copr:copr.fedorainfracloud.org:yzraeu:starship").repo_label
+        == "copr:yzraeu/starship"
+    )
+    assert make_package(repo="copr:owner:project").repo_label == "copr:owner/project"
+
+
+def test_repo_label_strips_installed_prefix() -> None:
+    assert make_package(repo="installed:updates").repo_label == "updates"
+    assert make_package(repo="installed:copr:x:y:z").repo_label == "copr:y/z"
+
+
+def test_repo_label_falls_back_to_unknown() -> None:
+    assert make_package(repo="").repo_label == "unknown"
+    assert make_package(repo="copr:").repo_label == "copr:"
+
+
 def test_install_reason_text() -> None:
     assert make_package().install_reason_text == "unknown"
     assert (
@@ -88,6 +110,11 @@ def test_matches_searches_name_summary_repo_and_description() -> None:
 
 def test_empty_query_matches_everything() -> None:
     assert make_package().matches("   ")
+
+
+def test_package_id_defaults_to_empty() -> None:
+    assert make_package().package_id == ""
+    assert make_package(package_id="gimp;1;x86_64;fedora").package_id.endswith("fedora")
 
 
 def test_repo_removability_follows_system_flag() -> None:

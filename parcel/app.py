@@ -11,6 +11,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio  # noqa: E402
 
 from parcel import APP_ID  # noqa: E402
+from parcel.backend.client import PackageKitClient  # noqa: E402
 from parcel.ui.window import MainWindow  # noqa: E402
 
 
@@ -26,7 +27,7 @@ class ParcelApplication(Adw.Application):
     def do_activate(self) -> None:
         window = self.get_active_window()
         if window is None:
-            window = MainWindow(application=self)
+            window = MainWindow(application=self, client=PackageKitClient())
         window.present()
 
 

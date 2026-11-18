@@ -1,93 +1,268 @@
-"""PackageKit queries used by Parcel.
+"""PackageKit queries and transactions used by Parcel.
 
 This is the only module allowed to talk to PackageKit. Views reach it through
 this client; they never import :mod:`gi.repository.PackageKitGlib` themselves.
 The module must not import GTK or libadwaita.
+
+PackageKit's server-side listing filters are not dependable: some builds
+ignore them, some renumber them. Everything is listed unfiltered and reduced
+here, so the client behaves the same on every PackageKit version.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 import gi
 
 gi.require_version("PackageKitGlib", "1.0")
 
-from gi.repository import PackageKitGlib  # noqa: E402
+from gi.repository import GLib, PackageKitGlib  # noqa: E402
 
+from parcel.backend.history import HistoryDatabase  # noqa: E402
 from parcel.backend.models import Package, Update  # noqa: E402
+from parcel.backend.rpmdb import RpmDatabase  # noqa: E402
+from parcel.backend.versioning import (  # noqa: E402
+    compare,
+    dedupe_latest,
+    sort_packages,
+)
 
-_FILTER_NEWEST = int(PackageKitGlib.FilterEnum.NEWEST)
-_FILTER_INSTALLED = int(PackageKitGlib.FilterEnum.INSTALLED)
-_FILTER_NOT_SOURCE = int(PackageKitGlib.FilterEnum.NOT_SOURCE)
-
-
-def _new_pk_client() -> Any:
-    """Build the real PackageKit client, lazily: queries are what need D-Bus."""
-    return PackageKitGlib.Client()
-
-
-def _split_package_id(package_id: str) -> tuple[str, str, str, str]:
-    """Split a PackageKit id (``name;version;arch;repo``)."""
-    parts = package_id.split(";")
-    if len(parts) != 4:
-        return package_id, "", "", ""
-    return parts[0], parts[1], parts[2], parts[3]
+# No filters: see the module docstring. PackageKit treats 0 as "no filtering".
+_NO_FILTERS = 0
+_NO_FLAGS = int(PackageKitGlib.TransactionFlagEnum.NONE)
+_SOURCE_ARCHES = frozenset({"src", "nosrc"})
 
 
-def _repo_from_id(package_id: str) -> str:
-    return _split_package_id(package_id)[3]
+class BackendError(RuntimeError):
+    """A PackageKit transaction did not succeed."""
+
+
+def _noop_progress(*_args: object) -> None:
+    """PackageKit requires a progress callback even when nobody listens."""
 
 
 class PackageKitClient:
-    """Synchronous PackageKit queries returning Parcel's plain models.
+    """Synchronous PackageKit access returning Parcel's plain models.
 
-    ``pk_client`` exists so tests can pass a fake; production code leaves it
-    unset and gets the daemon-backed client.
+    ``pk_client``, ``rpm_db``, and ``history`` exist so tests can pass fakes;
+    production code leaves them unset and gets the real implementations.
     """
 
-    def __init__(self, pk_client: Any = None) -> None:
-        self._client = pk_client if pk_client is not None else _new_pk_client()
+    def __init__(
+        self,
+        pk_client: Any = None,
+        rpm_db: RpmDatabase | None = None,
+        history: HistoryDatabase | None = None,
+    ) -> None:
+        self._client = pk_client if pk_client is not None else PackageKitGlib.Client()
+        self._rpm = rpm_db if rpm_db is not None else RpmDatabase()
+        self._history = history if history is not None else HistoryDatabase()
+        self._catalog: tuple[list[Package], list[Package]] | None = None
+
+    # -- listings ---------------------------------------------------------
+
+    def catalog(self) -> tuple[list[Package], list[Package]]:
+        """``(installed, available)`` packages, one entry per name and arch.
+
+        The full listing is fetched once and cached; transactions call
+        :meth:`invalidate`.
+        """
+        if self._catalog is None:
+            results = self._client.get_packages(_NO_FILTERS, None, _noop_progress, None)
+            installed_sizes = self._rpm.installed_sizes()
+            installed: list[Package] = []
+            available: list[Package] = []
+            for pkg in results.get_package_array():
+                if pkg.get_arch() in _SOURCE_ARCHES:
+                    continue
+                info = pkg.get_info()
+                if info == PackageKitGlib.InfoEnum.INSTALLED:
+                    package = self._to_package(
+                        pkg, installed=True, size=installed_sizes.get(pkg.get_name(), 0)
+                    )
+                    installed.append(package)
+                elif info == PackageKitGlib.InfoEnum.AVAILABLE:
+                    available.append(self._to_package(pkg, installed=False, size=0))
+            self._catalog = (
+                sort_packages(dedupe_latest(installed)),
+                sort_packages(dedupe_latest(available)),
+            )
+        return self._catalog
 
     def list_installed(self) -> list[Package]:
         """Packages currently installed on the system."""
-        results = self._client.get_packages(
-            _FILTER_INSTALLED | _FILTER_NEWEST, None, None, None
-        )
-        return [self._to_package(pkg) for pkg in results.get_package_array()]
+        return list(self.catalog()[0])
 
-    def search(self, query: str) -> list[Package]:
-        """Search package names and summaries for ``query``."""
-        term = query.strip()
-        if not term:
-            return []
-        results = self._client.search_names(
-            _FILTER_NEWEST | _FILTER_NOT_SOURCE, [term], None, None, None
-        )
-        return [self._to_package(pkg) for pkg in results.get_package_array()]
+    def list_available(self) -> list[Package]:
+        """Packages offered by the configured repositories, not installed."""
+        return list(self.catalog()[1])
 
-    def list_updates(self) -> list[Update]:
-        """Updates available for installed packages."""
-        results = self._client.get_updates(
-            _FILTER_NEWEST | _FILTER_NOT_SOURCE, None, None, None
+    def list_updates(
+        self, installed_versions: Mapping[str, str] | None = None
+    ) -> list[Update]:
+        """Newer versions of installed packages.
+
+        ``installed_versions`` maps package name to installed version; the
+        caller usually already has it from :meth:`list_installed`.
+        """
+        if installed_versions is None:
+            installed_versions = {p.name: p.version for p in self.list_installed()}
+        results = self._client.get_updates(_NO_FILTERS, None, _noop_progress, None)
+        newest: dict[tuple[str, str], Update] = {}
+        for pkg in results.get_package_array():
+            package = self._to_package(pkg, installed=False, size=0)
+            update = Update(
+                package=package,
+                installed_version=installed_versions.get(package.name),
+                security=pkg.get_info() == PackageKitGlib.InfoEnum.SECURITY,
+            )
+            key = (package.name, package.arch)
+            current = newest.get(key)
+            if current is None or compare(package.version, current.new_version) > 0:
+                newest[key] = update
+        return sorted(
+            newest.values(),
+            key=lambda update: (update.name.casefold(), update.package.arch),
         )
-        return [self._to_update(pkg) for pkg in results.get_package_array()]
+
+    def invalidate(self) -> None:
+        """Forget the cached catalog; the next listing hits PackageKit again."""
+        self._catalog = None
+
+    # -- details ----------------------------------------------------------
+
+    def get_detail(self, package: Package) -> Package:
+        """``package`` enriched with everything the detail view shows."""
+        details = self._details(package.package_id)
+        files = self._files(package.package_id) if package.installed else ()
+        install_date = None
+        install_reason = None
+        required_by: tuple[str, ...] = ()
+        if package.installed:
+            install_date = self._rpm.install_date(package.name)
+            install_reason = self._history.install_reason(package.name)
+            required_by = self._rpm.required_by(package.name)
+            changelog = self._rpm.changelog(package.name)
+        else:
+            changelog = self._update_changelog(package.package_id)
+        return replace(
+            package,
+            description=(details.get_description() if details else "")
+            or package.description
+            or package.summary,
+            license=(details.get_license() if details else "") or package.license,
+            homepage=(details.get_url() if details else "") or package.homepage,
+            size=(details.get_size() if details else 0) or package.size,
+            files=files,
+            install_date=install_date,
+            install_reason=install_reason,
+            required_by=required_by,
+            changelog=changelog,
+        )
+
+    def sizes(self, packages: Sequence[Package]) -> dict[str, int]:
+        """Sizes in bytes, keyed by PackageKit id, for the given packages."""
+        ids = [package.package_id for package in packages if package.package_id]
+        if not ids:
+            return {}
+        results = self._client.get_details(ids, None, _noop_progress, None)
+        sizes: dict[str, int] = {}
+        for details in results.get_details_array():
+            size = details.get_size()
+            if size:
+                sizes[details.get_package_id()] = size
+        return sizes
+
+    # -- transactions -----------------------------------------------------
+
+    def install(self, package: Package) -> None:
+        """Install ``package``. Asks for authorization via polkit."""
+        results = self._client.install_packages(
+            _NO_FLAGS, [self._package_id(package)], None, _noop_progress, None
+        )
+        self._check(results, package)
+        self.invalidate()
+
+    def remove(self, package: Package) -> None:
+        """Uninstall ``package``, without cascading to other packages."""
+        results = self._client.remove_packages(
+            _NO_FLAGS,
+            [self._package_id(package)],
+            False,
+            False,
+            None,
+            _noop_progress,
+            None,
+        )
+        self._check(results, package)
+        self.invalidate()
+
+    def update(self, packages: Sequence[Package]) -> None:
+        """Install the offered versions of ``packages`` in one transaction."""
+        ids = [self._package_id(package) for package in packages]
+        if not ids:
+            raise ValueError("no packages to update")
+        results = self._client.update_packages(
+            _NO_FLAGS, ids, None, _noop_progress, None
+        )
+        self._check(results, packages[0])
+        self.invalidate()
+
+    # -- helpers ----------------------------------------------------------
 
     @staticmethod
-    def _to_package(pkg: Any) -> Package:
-        info = pkg.get_info()
+    def _package_id(package: Package) -> str:
+        if not package.package_id:
+            raise BackendError(f"{package.name} has no PackageKit id")
+        return package.package_id
+
+    @staticmethod
+    def _check(results: Any, package: Package) -> None:
+        exit_code = results.get_exit_code()
+        if exit_code != PackageKitGlib.ExitEnum.SUCCESS:
+            raise BackendError(
+                f"PackageKit refused the transaction for {package.name} ({exit_code})"
+            )
+
+    def _details(self, package_id: str) -> Any | None:
+        if not package_id:
+            return None
+        results = self._client.get_details([package_id], None, _noop_progress, None)
+        details = results.get_details_array()
+        return details[0] if details else None
+
+    def _files(self, package_id: str) -> tuple[str, ...]:
+        if not package_id:
+            return ()
+        results = self._client.get_files([package_id], None, _noop_progress, None)
+        files = results.get_files_array()
+        return tuple(files[0].get_files()) if files else ()
+
+    def _update_changelog(self, package_id: str) -> str:
+        if not package_id:
+            return ""
+        try:
+            results = self._client.get_update_detail(
+                [package_id], None, _noop_progress, None
+            )
+        except GLib.Error:
+            return ""
+        details = results.get_update_detail_array()
+        return details[0].get_changelog() if details else ""
+
+    @staticmethod
+    def _to_package(pkg: Any, installed: bool, size: int) -> Package:
+        arch = pkg.get_arch()
         return Package(
             name=pkg.get_name(),
             version=pkg.get_version(),
-            repo=_repo_from_id(pkg.get_id()),
-            arch=pkg.get_arch(),
+            repo=pkg.get_id().split(";")[3] if pkg.get_id().count(";") == 3 else "",
+            arch=arch,
+            size=size,
             summary=pkg.get_summary(),
-            installed=info == PackageKitGlib.InfoEnum.INSTALLED,
-        )
-
-    @staticmethod
-    def _to_update(pkg: Any) -> Update:
-        return Update(
-            package=PackageKitClient._to_package(pkg),
-            security=pkg.get_info() == PackageKitGlib.InfoEnum.SECURITY,
+            installed=installed,
+            package_id=pkg.get_id(),
         )

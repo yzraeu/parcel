@@ -22,6 +22,7 @@ def test_application_id_matches_the_project() -> None:
 
 def test_first_activation_builds_and_presents_the_main_window(monkeypatch) -> None:
     created: list[FakeWindow] = []
+    client = object()
 
     def fake_window_factory(**kwargs: object) -> FakeWindow:
         window = FakeWindow(**kwargs)
@@ -29,13 +30,14 @@ def test_first_activation_builds_and_presents_the_main_window(monkeypatch) -> No
         return window
 
     monkeypatch.setattr(app_module, "MainWindow", fake_window_factory)
+    monkeypatch.setattr(app_module, "PackageKitClient", lambda: client)
     app = app_module.ParcelApplication()
     monkeypatch.setattr(app, "get_active_window", lambda: None)
 
     app.do_activate()
 
     assert len(created) == 1
-    assert created[0].kwargs == {"application": app}
+    assert created[0].kwargs == {"application": app, "client": client}
     assert created[0].presented
 
 

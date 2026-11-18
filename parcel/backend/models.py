@@ -34,7 +34,11 @@ def format_size(size: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Package:
-    """One rpm, installed or available."""
+    """One rpm, installed or available.
+
+    ``package_id`` is PackageKit's ``name;version;arch;repo`` id; it is the
+    only way to name a package in a transaction.
+    """
 
     name: str
     version: str
@@ -51,11 +55,20 @@ class Package:
     files: tuple[str, ...] = ()
     changelog: str = ""
     homepage: str = ""
-    source_url: str = ""
+    package_id: str = ""
 
     @property
     def size_text(self) -> str:
-        return format_size(self.size)
+        return format_size(self.size) if self.size else "unknown"
+
+    @property
+    def repo_label(self) -> str:
+        """Short repo name for display; PackageKit prefixes installed repos."""
+        repo = self.repo.removeprefix("installed:")
+        parts = repo.split(":")
+        if parts[0] == "copr" and len(parts) >= 3:
+            return f"copr:{parts[-2]}/{parts[-1]}"
+        return repo or "unknown"
 
     @property
     def install_reason_text(self) -> str:
