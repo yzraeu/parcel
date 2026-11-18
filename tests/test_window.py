@@ -14,9 +14,18 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from parcel.backend.models import Package, Update  # noqa: E402
+from parcel.backend.models import (  # noqa: E402
+    Package,
+    Repo,
+    RepoKind,
+    RepoPlan,
+    RepoRequest,
+    Update,
+)
 from parcel.ui.confirm_dialog import CANCEL_RESPONSE, REMOVE_RESPONSE  # noqa: E402
 from parcel.ui.package_row import RowAction  # noqa: E402
+from parcel.ui.repo_dialog import AddRepoDialog  # noqa: E402
+from parcel.ui.repos_view import ReposPage  # noqa: E402
 from parcel.ui.tasks import SyncRunner  # noqa: E402
 from parcel.ui.window import PAGE_TITLES, MainWindow  # noqa: E402
 
@@ -55,6 +64,23 @@ FIREFOX_UPDATE = Update(
     installed_version="141.0.3-1.fc44",
     security=True,
 )
+FEDORA_REPO = Repo(repo_id="fedora", name="Fedora", system=True)
+UPDATES_REPO = Repo(
+    repo_id="updates", name="Fedora Updates", enabled=False, system=True
+)
+RPMFUSION_REPO = Repo(repo_id="rpmfusion-free", name="RPM Fusion Free")
+REPO_PLAN = RepoPlan(
+    request=RepoRequest(kind=RepoKind.COPR, copr="owner/project"),
+    repo_id="copr:copr.fedorainfracloud.org:owner:project",
+    name="Copr repo for project owned by owner",
+    baseurl="https://copr.example/owner/project/",
+    key_url="https://download.example/pubkey.gpg",
+    key_fingerprint="0123456789ABCDEF0123456789ABCDEF01234567",
+    key_id="KEYID",
+    repo_file_name="_copr:owner:project.repo",
+    repo_file="[copr:owner:project]\n",
+    key_data=b"KEY",
+)
 
 
 class FakeClient:
@@ -63,12 +89,21 @@ class FakeClient:
         installed: Sequence[Package] = (FIREFOX, FLATPAK),
         available: Sequence[Package] = (GIMP, HTOP),
         updates: Sequence[Update] = (FIREFOX_UPDATE, NUATILUS_UPDATE),
+        repos: Sequence[Repo] = (FEDORA_REPO, UPDATES_REPO, RPMFUSION_REPO),
         error: Exception | None = None,
+        repo_error: Exception | None = None,
     ) -> None:
         self.installed = list(installed)
         self.available = list(available)
         self.updates = list(updates)
+        self.repos = list(repos)
         self.error = error
+        self.repo_error = repo_error
+        self.repo_calls = 0
+        self.prepared_requests: list[RepoRequest] = []
+        self.added_plans: list[RepoPlan] = []
+        self.removed_repos: list[Repo] = []
+        self.toggles: list[tuple[Repo, bool]] = []
         self.catalog_calls = 0
         self.version_maps: list[Mapping[str, str] | None] = []
         self.detail_requests: list[Package] = []
@@ -105,6 +140,26 @@ class FakeClient:
     def update(self, packages: Sequence[Package]) -> None:
         self.updated_calls.append(list(packages))
 
+    def list_repos(self) -> list[Repo]:
+        self.repo_calls += 1
+        if self.repo_error is not None:
+            raise self.repo_error
+        return list(self.repos)
+
+    def prepare_repo(self, request: RepoRequest) -> RepoPlan:
+        self.prepared_requests.append(request)
+        return REPO_PLAN
+
+    def add_repo(self, plan: RepoPlan) -> None:
+        self.added_plans.append(plan)
+
+    def remove_repo(self, repo: Repo) -> None:
+        self.removed_repos.append(repo)
+        self.repos = [candidate for candidate in self.repos if candidate != repo]
+
+    def set_repo_enabled(self, repo: Repo, enabled: bool) -> None:
+        self.toggles.append((repo, enabled))
+
 
 def make_window(client: FakeClient | None = None, runner=None) -> MainWindow:
     return MainWindow(
@@ -123,11 +178,12 @@ def test_window_has_the_four_tabs() -> None:
         assert window.stack.get_page(page).get_title() == title
 
 
-def test_three_tabs_are_package_lists_and_repos_is_a_stub() -> None:
+def test_three_tabs_are_package_lists_and_repos_is_its_own_page() -> None:
     window = make_window()
 
     assert set(window.pages) == {"installed", "available", "updates"}
-    assert isinstance(window.stack.get_child_by_name("repos"), Adw.StatusPage)
+    assert isinstance(window.repos_page, ReposPage)
+    assert window.stack.get_child_by_name("repos") is window.repos_page
 
 
 def test_installed_tab_lists_real_client_data() -> None:
@@ -346,6 +402,158 @@ def test_window_hosts_content_in_a_toast_overlay() -> None:
 
     assert isinstance(window.toast_overlay, Adw.ToastOverlay)
     assert isinstance(window.toast_overlay.get_child(), Adw.ToolbarView)
+
+
+def test_repos_tab_shows_each_repo_with_its_actions() -> None:
+    window = make_window()
+
+    assert window.repos_page.visible_count == 3
+    assert set(window.repos_page.rows) == {
+        "fedora",
+        "updates",
+        "rpmfusion-free",
+    }
+    assert window.repos_page.switches["fedora"].get_active()
+    assert not window.repos_page.switches["updates"].get_active()
+    assert "fedora" not in window.repos_page.remove_buttons
+    assert "updates" not in window.repos_page.remove_buttons
+    assert "rpmfusion-free" in window.repos_page.remove_buttons
+
+
+def test_toggling_a_repo_switch_goes_through_the_client(monkeypatch) -> None:
+    client = FakeClient()
+    window = make_window(client)
+    messages: list[str] = []
+    monkeypatch.setattr(window, "_show_toast", messages.append)
+
+    window.repos_page.switches["updates"].set_active(True)
+
+    assert client.toggles == [(UPDATES_REPO, True)]
+    assert messages == ["Enabling Fedora Updates\u2026", "Enabled Fedora Updates"]
+    assert client.repo_calls == 2
+
+
+def test_failed_toggle_reloads_the_real_state(monkeypatch) -> None:
+    client = FakeClient()
+    window = make_window(client)
+    messages: list[str] = []
+    monkeypatch.setattr(window, "_show_toast", messages.append)
+
+    def fail(_repo: Repo, _enabled: bool) -> None:
+        raise RuntimeError("polkit said no")
+
+    monkeypatch.setattr(client, "set_repo_enabled", fail)
+    window.repos_page.switches["updates"].set_active(True)
+
+    assert messages == [
+        "Enabling Fedora Updates\u2026",
+        "Could not enable Fedora Updates: polkit said no",
+    ]
+    assert client.repo_calls == 2
+
+
+def test_removing_a_repo_goes_through_the_client(monkeypatch) -> None:
+    client = FakeClient()
+    window = make_window(client)
+    messages: list[str] = []
+    monkeypatch.setattr(window, "_show_toast", messages.append)
+
+    window.repos_page.remove_buttons["rpmfusion-free"].emit("clicked")
+
+    assert client.removed_repos == [RPMFUSION_REPO]
+    assert messages == [
+        "Removing RPM Fusion Free\u2026",
+        "Removed RPM Fusion Free",
+    ]
+    assert window.repos_page.visible_count == 2
+
+
+def test_system_repos_cannot_be_removed(monkeypatch) -> None:
+    client = FakeClient()
+    window = make_window(client)
+    messages: list[str] = []
+    monkeypatch.setattr(window, "_show_toast", messages.append)
+
+    window._remove_repo(FEDORA_REPO)
+
+    assert client.removed_repos == []
+    assert messages == ["Fedora is a system repository and cannot be removed"]
+
+
+def test_add_repo_prepares_and_only_adds_after_confirmation(monkeypatch) -> None:
+    client = FakeClient()
+    window = make_window(client)
+    messages: list[str] = []
+    monkeypatch.setattr(window, "_show_toast", messages.append)
+    monkeypatch.setattr(AddRepoDialog, "present", lambda _dialog, _parent: None)
+
+    window._add_repo()
+    dialog = window.add_repo_dialog
+    assert dialog is not None
+    dialog.copr_entry.set_text("owner/project")
+    dialog.add_button.emit("clicked")
+
+    assert client.prepared_requests == [
+        RepoRequest(kind=RepoKind.COPR, copr="owner/project")
+    ]
+    assert client.added_plans == []
+    assert dialog.content_stack.get_visible_child_name() == "confirm"
+    assert dialog.fingerprint_label.get_label().startswith("0123 4567")
+
+    dialog.trust_button.emit("clicked")
+
+    assert client.added_plans == [REPO_PLAN]
+    assert messages == ["Added Copr repo for project owned by owner"]
+
+
+def test_add_repo_prepare_failure_is_shown_in_the_dialog(monkeypatch) -> None:
+    client = FakeClient()
+    window = make_window(client)
+    monkeypatch.setattr(AddRepoDialog, "present", lambda _dialog, _parent: None)
+
+    def fail(_request: RepoRequest) -> RepoPlan:
+        raise RuntimeError("the key did not download")
+
+    monkeypatch.setattr(client, "prepare_repo", fail)
+    window._add_repo()
+    dialog = window.add_repo_dialog
+    assert dialog is not None
+    dialog.copr_entry.set_text("owner/project")
+    dialog.add_button.emit("clicked")
+
+    assert dialog.error_label.get_visible()
+    assert "the key did not download" in dialog.error_label.get_label()
+    assert client.added_plans == []
+
+
+def test_add_repo_failure_is_shown_in_the_dialog(monkeypatch) -> None:
+    client = FakeClient()
+    window = make_window(client)
+    monkeypatch.setattr(AddRepoDialog, "present", lambda _dialog, _parent: None)
+
+    def fail(_plan: RepoPlan) -> None:
+        raise RuntimeError("dnf refused")
+
+    monkeypatch.setattr(client, "add_repo", fail)
+    window._add_repo()
+    dialog = window.add_repo_dialog
+    assert dialog is not None
+    dialog.show_plan(REPO_PLAN)
+    dialog.trust_button.emit("clicked")
+
+    assert dialog.error_label.get_visible()
+    assert "dnf refused" in dialog.error_label.get_label()
+
+
+def test_repository_load_failure_is_reported(monkeypatch) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(
+        MainWindow, "_show_toast", lambda _self, text: messages.append(text)
+    )
+
+    make_window(FakeClient(repo_error=RuntimeError("no repo list")))
+
+    assert messages == ["Could not load repositories: no repo list"]
 
 
 def test_views_do_not_import_the_packagekit_client() -> None:

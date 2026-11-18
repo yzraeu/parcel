@@ -4,9 +4,9 @@ A fast, simple, packages-only GUI for dnf on Fedora. Four tabs, a search
 box, one button per action. No app-store features: that is GNOME Software's
 job.
 
-Status: **v0.1.0 main screen**. Browse, search, install, remove, and update
-real packages through PackageKit, with a detail view for every package.
-Repository management is issue #3.
+Status: **v0.2.0 repo management**. Browse, search, install, remove, and update
+real packages through PackageKit, with a detail view for every package, plus a
+Repos tab that adds, removes, enables, and disables repositories.
 
 ## Features
 
@@ -21,6 +21,17 @@ Repository management is issue #3.
   tab.
 - **Search** in the header filters the tab you are looking at; switching tabs
   applies the same query to the newly selected tab.
+- **Repos** tab: one row per repository with an enable/disable switch. The
+  Fedora distribution repos (`fedora`, `updates`) can be switched off but
+  never removed; every other repo has a red trash-can button that removes
+  only the repository — packages installed from it stay installed and simply
+  stop getting updates.
+- **Add repository** opens a form with two paths: a COPR project
+  (`owner/project`) or a repository URL (name + base URL). Adding a repository
+  first downloads its signing key, shows the key fingerprint, and asks for
+  confirmation before the key is trusted and the repo is written. The COPR
+  path runs `dnf copr enable` when the plugin is there and falls back to
+  writing the `.repo` file plus importing the key.
 - **Package detail** (tap a row): description, license, size, repository,
   architecture, install date, install reason (installed by you vs installed
   as a dependency), reverse dependencies, the installed file list (first few
@@ -38,13 +49,17 @@ parcel/                     # app package
   app.py                    # Adw.Application subclass; builds the real client
   backend/                  # PackageKit and system data, never imports GTK
     __init__.py
-    client.py               # listings, details, sizes, install/remove/update
-    models.py               # plain data classes: Package, Repo, Update
+    client.py               # listings, details, sizes, install/remove/update, repos
+    models.py               # plain data classes: Package, Repo, RepoPlan, Update
+    commands.py             # privileged helper programs, always via argv
+    keys.py                 # signing-key download and gpg fingerprint reading
+    repo_files.py           # .repo file validation and content, pure functions
+    repos.py                # prepare (fingerprint) then install a repository
     rpmdb.py                # install dates, files, required-by, changelog
     history.py              # install reasons from the dnf history database
     versioning.py           # rpm version comparison and newest-version dedupe
     links.py                # homepage, source, build page URLs
-  ui/                       # GTK views, never calls PackageKit
+  ui/                       # GTK views, never calls PackageKit or a shell
     __init__.py
     window.py               # header bar, search, tabs, actions, toasts
     package_list.py         # virtualized list page with filtering
@@ -55,8 +70,9 @@ parcel/                     # app package
     size_loader.py          # batched size lookups for visible rows
     confirm_dialog.py       # remove confirmation (destructive response)
     tasks.py                # worker-thread runner (and a synchronous one)
-    repos_view.py           # Repos tab placeholder (issue #3)
-tests/                      # fakes only; no test touches live D-Bus or rpmdb
+    repos_view.py           # Repos tab: rows, switches, add and remove
+    repo_dialog.py          # add-repository form and key confirmation
+tests/                      # fakes only; no live D-Bus, rpmdb, shell, or network
 Makefile                    # run, test, lint
 pyproject.toml              # ruff + pytest config
 .github/workflows/ci.yml    # lint + test on push and pull request
@@ -72,13 +88,15 @@ These are non-negotiable:
 - **Backend never imports GTK.** `parcel/backend` must stay usable from a
   headless session. `tests/test_backend.py` checks this in a fresh
   interpreter.
-- **UI never calls PackageKit.** Views render `parcel.backend.models`
-  objects and forward user intent; only `parcel.backend.client` talks to
-  PackageKit. `tests/test_window.py` checks that importing the UI does not
-  pull in the client or `PackageKitGlib`.
+- **UI never calls PackageKit, never shells out, and never writes files.**
+  Views render `parcel.backend.models` objects and forward user intent; only
+  `parcel.backend.client` talks to PackageKit, and only `parcel.backend` runs
+  `pkexec` helpers. `tests/test_window.py` checks that importing the UI does
+  not pull in the client or `PackageKitGlib`.
 - **One responsibility per module.** No god files.
-- **Every module has a test.** Tests fake PackageKit, rpm, and dnf history
-  and never touch live D-Bus, the rpm database, or the history database.
+- **Every module has a test.** Tests fake PackageKit, rpm, dnf history, and
+  the privileged helpers, and never touch live D-Bus, the rpm database, the
+  history database, or the network.
   Never weaken or delete a test to get CI green.
 
 ### Why the client reduces data itself
@@ -95,17 +113,20 @@ screen.
 
 - Python 3.11 or newer
 - PyGObject, GTK 4, libadwaita
-- PackageKit and python3-rpm
+- PackageKit, python3-rpm, and gnupg2 (gpg reads key fingerprints)
+- `dnf-plugins-core` for `dnf copr enable` (optional: Parcel falls back to
+  writing the `.repo` file and importing the key itself)
 - A display for the widget tests (CI uses Xvfb)
 
 On Fedora:
 
 ```sh
 sudo dnf install python3-gobject gtk4 libadwaita PackageKit-glib \
-    python3-rpm python3-pytest ruff
+    python3-rpm gnupg2 dnf-plugins-core python3-pytest ruff
 ```
 
-Install and remove transactions ask for authorization through polkit.
+Install, remove, and repository changes ask for authorization through
+polkit.
 
 ## Run
 

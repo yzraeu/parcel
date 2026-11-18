@@ -12,12 +12,13 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GObject, Gtk  # noqa: E402
 
-from parcel.backend.models import Package, Update  # noqa: E402
+from parcel.backend.models import Package, Repo, RepoPlan, RepoRequest, Update  # noqa: E402
 from parcel.ui import tasks  # noqa: E402
 from parcel.ui.confirm_dialog import build_remove_dialog  # noqa: E402
 from parcel.ui.package_list import PackageListPage  # noqa: E402
 from parcel.ui.package_row import RowAction  # noqa: E402
-from parcel.ui.repos_view import build_repos_view  # noqa: E402
+from parcel.ui.repo_dialog import AddRepoDialog  # noqa: E402
+from parcel.ui.repos_view import ReposPage  # noqa: E402
 from parcel.ui.size_loader import SizeLoader  # noqa: E402
 from parcel.ui.updates_page import UpdatesPage  # noqa: E402
 
@@ -58,6 +59,16 @@ class PackageBackend(Protocol):
 
     def update(self, packages: Sequence[Package]) -> None: ...
 
+    def list_repos(self) -> list[Repo]: ...
+
+    def prepare_repo(self, request: RepoRequest) -> RepoPlan: ...
+
+    def add_repo(self, plan: RepoPlan) -> None: ...
+
+    def remove_repo(self, repo: Repo) -> None: ...
+
+    def set_repo_enabled(self, repo: Repo, enabled: bool) -> None: ...
+
 
 class MainWindow(Adw.ApplicationWindow):
     """Parcel's only window at this stage."""
@@ -79,6 +90,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._size_loader = SizeLoader(client.sizes, self._runner)
         self._updates: list[Update] = []
         self.remove_dialog: Adw.AlertDialog | None = None
+        self.add_repo_dialog: AddRepoDialog | None = None
 
         self.stack = Adw.ViewStack()
         self.search_entry = Gtk.SearchEntry(placeholder_text="Search packages")
@@ -133,6 +145,11 @@ class MainWindow(Adw.ApplicationWindow):
             self._update_all,
             self._size_loader,
         )
+        self.repos_page = ReposPage(
+            self._toggle_repo,
+            self._remove_repo,
+            self._add_repo,
+        )
         self.pages: dict[str, PackageListPage] = {
             "installed": self.installed_page,
             "available": self.available_page,
@@ -146,7 +163,7 @@ class MainWindow(Adw.ApplicationWindow):
         for name, page in self.pages.items():
             self.stack.add_titled_with_icon(page, name, PAGE_TITLES[name], icons[name])
         self.stack.add_titled_with_icon(
-            build_repos_view(), "repos", PAGE_TITLES["repos"], "folder-symbolic"
+            self.repos_page, "repos", PAGE_TITLES["repos"], "folder-symbolic"
         )
 
         self.search_entry.connect("search-changed", self._on_search_changed)
@@ -159,7 +176,9 @@ class MainWindow(Adw.ApplicationWindow):
     def _load(self) -> None:
         for page in self.pages.values():
             page.set_loading(True)
+        self.repos_page.set_loading(True)
         self._runner.run(self._fetch, self._loaded, self._load_failed)
+        self._load_repos()
 
     def _fetch(self) -> tuple[list[Package], list[Package], list[Update]]:
         installed, available = self.client.catalog()
@@ -182,6 +201,18 @@ class MainWindow(Adw.ApplicationWindow):
         for page in self.pages.values():
             page.set_loading(False)
         self._show_toast(f"Could not load packages: {error}")
+
+    def _load_repos(self) -> None:
+        self.repos_page.set_loading(True)
+        self._runner.run(
+            self.client.list_repos,
+            self.repos_page.set_repos,
+            self._repos_failed,
+        )
+
+    def _repos_failed(self, error: Exception) -> None:
+        self.repos_page.set_loading(False)
+        self._show_toast(f"Could not load repositories: {error}")
 
     # -- search ------------------------------------------------------------
 
@@ -267,6 +298,74 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _transaction_done(self, done: str, target: str) -> None:
         self._show_toast(f"{done} {target}")
+        self._load()
+
+    # -- repositories ------------------------------------------------------
+
+    def _toggle_repo(self, repo: Repo, enabled: bool) -> None:
+        self._show_toast(f"{'Enabling' if enabled else 'Disabling'} {repo.name}\u2026")
+        self._runner.run(
+            lambda: self.client.set_repo_enabled(repo, enabled),
+            lambda _result: self._repos_changed(
+                f"{'Enabled' if enabled else 'Disabled'} {repo.name}"
+            ),
+            lambda error: self._repo_action_failed(
+                "enable" if enabled else "disable", repo, error
+            ),
+        )
+
+    def _repos_changed(self, message: str) -> None:
+        self._show_toast(message)
+        # The available package list and the updates list both depend on the
+        # repositories that are enabled.
+        self._load()
+
+    def _repo_action_failed(self, verb: str, repo: Repo, error: Exception) -> None:
+        self._show_toast(f"Could not {verb} {repo.name}: {error}")
+        self._load_repos()
+
+    def _remove_repo(self, repo: Repo) -> None:
+        if not repo.removable:
+            self._show_toast(
+                f"{repo.name} is a system repository and cannot be removed"
+            )
+            return
+        self._show_toast(f"Removing {repo.name}\u2026")
+        self._runner.run(
+            lambda: self.client.remove_repo(repo),
+            lambda _result: self._repo_removed(repo),
+            lambda error: self._repo_action_failed("remove", repo, error),
+        )
+
+    def _repo_removed(self, repo: Repo) -> None:
+        self._show_toast(f"Removed {repo.name}")
+        self._load()
+
+    def _add_repo(self) -> None:
+        dialog = AddRepoDialog(
+            on_prepare=lambda request: self._prepare_repo(dialog, request),
+            on_confirm=lambda plan: self._confirm_add_repo(dialog, plan),
+        )
+        self.add_repo_dialog = dialog
+        dialog.present(self)
+
+    def _prepare_repo(self, dialog: AddRepoDialog, request: RepoRequest) -> None:
+        self._runner.run(
+            lambda: self.client.prepare_repo(request),
+            dialog.show_plan,
+            dialog.show_error,
+        )
+
+    def _confirm_add_repo(self, dialog: AddRepoDialog, plan: RepoPlan) -> None:
+        self._runner.run(
+            lambda: self.client.add_repo(plan),
+            lambda _result: self._repo_added(dialog, plan),
+            dialog.show_error,
+        )
+
+    def _repo_added(self, dialog: AddRepoDialog, plan: RepoPlan) -> None:
+        dialog.close()
+        self._show_toast(f"Added {plan.name}")
         self._load()
 
     def _show_toast(self, message: str) -> None:

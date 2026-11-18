@@ -8,6 +8,9 @@ from parcel.backend.models import (
     InstallReason,
     Package,
     Repo,
+    RepoKind,
+    RepoPlan,
+    RepoRequest,
     Update,
     format_size,
 )
@@ -144,3 +147,28 @@ def test_update_without_installed_version_shows_new_version() -> None:
 def test_install_date_is_kept_verbatim() -> None:
     installed_at = datetime(2026, 11, 2, 9, 14)
     assert make_package(install_date=installed_at).install_date == installed_at
+
+
+def test_repo_subtitle_shows_the_id_and_system_status() -> None:
+    assert Repo(repo_id="fedora", name="Fedora", system=True).subtitle == (
+        "fedora \u00b7 System repository"
+    )
+    assert Repo(repo_id="my-repo", name="Mine").subtitle == "my-repo"
+
+
+def test_repo_plan_groups_the_fingerprint_for_display() -> None:
+    plan = RepoPlan(
+        request=RepoRequest(kind=RepoKind.URL, name="mine", baseurl="https://x"),
+        repo_id="mine",
+        name="mine",
+        baseurl="https://x",
+        key_url="https://x/key",
+        key_fingerprint="0123456789ABCDEF0123456789ABCDEF01234567",
+        key_id="KEYID",
+        repo_file_name="parcel-mine.repo",
+        repo_file="[mine]\n",
+    )
+
+    assert plan.fingerprint_text == (
+        "0123 4567 89AB CDEF 0123 4567 89AB CDEF 0123 4567"
+    )

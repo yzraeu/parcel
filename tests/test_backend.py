@@ -16,7 +16,15 @@ gi.require_version("PackageKitGlib", "1.0")
 from gi.repository import GLib, PackageKitGlib  # noqa: E402
 
 from parcel.backend.client import BackendError, PackageKitClient  # noqa: E402
-from parcel.backend.models import InstallReason, Package, Update  # noqa: E402
+from parcel.backend.models import (  # noqa: E402
+    InstallReason,
+    Package,
+    Repo,
+    RepoKind,
+    RepoPlan,
+    RepoRequest,
+    Update,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -104,6 +112,22 @@ class FakeUpdateDetail:
         return self.changelog
 
 
+class FakeRepoDetail:
+    def __init__(self, repo_id: str, description: str, enabled: bool = True) -> None:
+        self.repo_id = repo_id
+        self.description = description
+        self.enabled = enabled
+
+    def get_id(self) -> str:
+        return self.repo_id
+
+    def get_description(self) -> str:
+        return self.description
+
+    def get_enabled(self) -> bool:
+        return self.enabled
+
+
 class FakeResults:
     def __init__(
         self,
@@ -111,12 +135,14 @@ class FakeResults:
         details: list[FakeDetails] | None = None,
         files: list[FakeFiles] | None = None,
         update_details: list[FakeUpdateDetail] | None = None,
+        repo_details: list[FakeRepoDetail] | None = None,
         exit_code: Any = PackageKitGlib.ExitEnum.SUCCESS,
     ) -> None:
         self.packages = packages or []
         self.details = details or []
         self.files = files or []
         self.update_details = update_details or []
+        self.repo_details = repo_details or []
         self.exit_code = exit_code
 
     def get_package_array(self) -> list[FakePackage]:
@@ -131,6 +157,9 @@ class FakeResults:
     def get_update_detail_array(self) -> list[FakeUpdateDetail]:
         return list(self.update_details)
 
+    def get_repo_detail_array(self) -> list[FakeRepoDetail]:
+        return list(self.repo_details)
+
     def get_exit_code(self) -> Any:
         return self.exit_code
 
@@ -143,6 +172,7 @@ class FakePkClient:
         details: list[FakeDetails] | None = None,
         files: list[FakeFiles] | None = None,
         update_details: list[FakeUpdateDetail] | None = None,
+        repo_details: list[FakeRepoDetail] | None = None,
         exit_code: Any = PackageKitGlib.ExitEnum.SUCCESS,
     ) -> None:
         self.packages = packages or []
@@ -150,6 +180,7 @@ class FakePkClient:
         self.details = details or []
         self.files = files or []
         self.update_details = update_details or []
+        self.repo_details = repo_details or []
         self.exit_code = exit_code
         self.calls: list[tuple[str, ...]] = []
 
@@ -183,6 +214,18 @@ class FakePkClient:
 
     def update_packages(self, *args: object) -> FakeResults:
         self.calls.append(("update_packages", *args))
+        return FakeResults(exit_code=self.exit_code)
+
+    def get_repo_list(self, *args: object) -> FakeResults:
+        self.calls.append(("get_repo_list", *args))
+        return FakeResults(repo_details=self.repo_details)
+
+    def repo_enable(self, *args: object) -> FakeResults:
+        self.calls.append(("repo_enable", *args))
+        return FakeResults(exit_code=self.exit_code)
+
+    def repo_remove(self, *args: object) -> FakeResults:
+        self.calls.append(("repo_remove", *args))
         return FakeResults(exit_code=self.exit_code)
 
 
@@ -223,6 +266,37 @@ class FakeHistory:
 
     def install_reason(self, _name: str) -> InstallReason | None:
         return self.reason
+
+
+class FakeRepoManager:
+    def __init__(self, plan: RepoPlan | None = None) -> None:
+        self.plan = plan
+        self.prepared: list[RepoRequest] = []
+        self.added: list[RepoPlan] = []
+
+    def prepare(self, request: RepoRequest) -> RepoPlan:
+        self.prepared.append(request)
+        if self.plan is None:
+            raise AssertionError("no plan configured")
+        return self.plan
+
+    def add(self, plan: RepoPlan) -> None:
+        self.added.append(plan)
+
+
+def make_plan() -> RepoPlan:
+    return RepoPlan(
+        request=RepoRequest(kind=RepoKind.URL, name="myrepo", baseurl="https://x"),
+        repo_id="myrepo",
+        name="myrepo",
+        baseurl="https://x",
+        key_url="https://x/key",
+        key_fingerprint="0123456789ABCDEF0123456789ABCDEF01234567",
+        key_id="KEYID",
+        repo_file_name="parcel-myrepo.repo",
+        repo_file="[myrepo]\n",
+        key_data=b"KEY",
+    )
 
 
 def installed(name: str, version: str = "1.0-1.fc44") -> FakePackage:
@@ -502,6 +576,99 @@ def test_transactions_require_a_packagekit_id() -> None:
 
     with pytest.raises(BackendError):
         client.install(package)
+
+
+# -- repositories ----------------------------------------------------------
+
+
+def test_list_repos_maps_details_and_puts_system_repos_first() -> None:
+    client, fake = make_client(
+        repo_details=[
+            FakeRepoDetail("rpmfusion-free", "RPM Fusion Free", enabled=False),
+            FakeRepoDetail("updates", "Fedora Updates", enabled=True),
+            FakeRepoDetail(
+                "copr:copr.fedorainfracloud.org:owner:project", "A COPR", enabled=True
+            ),
+            FakeRepoDetail("fedora", "Fedora", enabled=True),
+        ]
+    )
+
+    repos = client.list_repos()
+
+    assert [repo.repo_id for repo in repos] == [
+        "fedora",
+        "updates",
+        "copr:copr.fedorainfracloud.org:owner:project",
+        "rpmfusion-free",
+    ]
+    assert [repo.system for repo in repos] == [True, True, False, False]
+    assert repos[0].name == "Fedora"
+    assert not repos[3].enabled
+    assert repos[2].copr == "copr:copr.fedorainfracloud.org:owner:project"
+    assert fake.calls[-1][0] == "get_repo_list"
+
+
+def test_set_repo_enabled_asks_packagekit_and_drops_the_catalog() -> None:
+    client, fake = make_client(packages=[installed("firefox")])
+    client.list_installed()
+    repo = Repo(repo_id="updates", name="Fedora Updates")
+
+    client.set_repo_enabled(repo, False)
+
+    method, repo_id, enabled, *_ = fake.calls[-1]
+    assert method == "repo_enable"
+    assert repo_id == "updates"
+    assert enabled is False
+
+    client.list_installed()
+    assert [call[0] for call in fake.calls].count("get_packages") == 2
+
+
+def test_remove_repo_never_autoremoves_packages() -> None:
+    client, fake = make_client()
+    repo = Repo(repo_id="rpmfusion-free", name="RPM Fusion Free")
+
+    client.remove_repo(repo)
+
+    method, _flags, repo_id, autoremove, *_ = fake.calls[-1]
+    assert method == "repo_remove"
+    assert repo_id == "rpmfusion-free"
+    assert autoremove is False
+
+
+def test_remove_repo_refuses_a_system_repo() -> None:
+    client, fake = make_client()
+
+    with pytest.raises(BackendError):
+        client.remove_repo(Repo(repo_id="fedora", name="Fedora", system=True))
+
+    assert fake.calls == []
+
+
+def test_failed_repo_change_raises() -> None:
+    client, _ = make_client(exit_code=PackageKitGlib.ExitEnum.FAILED)
+
+    with pytest.raises(BackendError):
+        client.set_repo_enabled(Repo(repo_id="updates", name="Updates"), False)
+
+    with pytest.raises(BackendError):
+        client.remove_repo(Repo(repo_id="rpmfusion-free", name="RPM Fusion"))
+
+
+def test_repo_preparation_and_adding_go_through_the_manager() -> None:
+    manager = FakeRepoManager(plan=make_plan())
+    fake = FakePkClient()
+    client = PackageKitClient(
+        fake, rpm_db=FakeRpm(), history=FakeHistory(), repos=manager
+    )
+    request = RepoRequest(kind=RepoKind.URL, name="myrepo", baseurl="https://x")
+
+    plan = client.prepare_repo(request)
+    client.add_repo(plan)
+
+    assert manager.prepared == [request]
+    assert manager.added == [plan]
+    assert plan is manager.plan
 
 
 # -- layering --------------------------------------------------------------

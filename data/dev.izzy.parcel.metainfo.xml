@@ -19,6 +19,15 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-11-18">
+      <description>
+        <p>
+          Repositories tab: enable, disable, add, and remove repositories
+          with signing-key fingerprint confirmation before a new key is
+          trusted.
+        </p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-17">
       <description>
         <p>Project scaffold: four-tab window, PackageKit client, tests, CI.</p>

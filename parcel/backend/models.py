@@ -113,6 +113,60 @@ class Repo:
         """System repos may be disabled but never removed."""
         return not self.system
 
+    @property
+    def subtitle(self) -> str:
+        parts = [self.repo_id]
+        if self.system:
+            parts.append("System repository")
+        return " \u00b7 ".join(part for part in parts if part)
+
+
+class RepoKind(Enum):
+    """The two ways the add-repository form can describe a new repo."""
+
+    COPR = "copr"
+    URL = "url"
+
+
+@dataclass(frozen=True, slots=True)
+class RepoRequest:
+    """What the user typed into the add-repository form."""
+
+    kind: RepoKind
+    copr: str = ""
+    name: str = ""
+    baseurl: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RepoPlan:
+    """A repository ready to be written, with its key already inspected.
+
+    ``key_data`` is the exact key whose fingerprint is shown for
+    confirmation; the fallback installer imports those bytes, never a fresh
+    download. ``command`` is the preferred privileged command (COPR only).
+    """
+
+    request: RepoRequest
+    repo_id: str
+    name: str
+    baseurl: str
+    key_url: str
+    key_fingerprint: str
+    key_id: str
+    repo_file_name: str
+    repo_file: str
+    key_data: bytes = b""
+    command: tuple[str, ...] = ()
+
+    @property
+    def fingerprint_text(self) -> str:
+        """Fingerprint in groups of four, the way gpg prints it."""
+        fingerprint = self.key_fingerprint
+        return " ".join(
+            fingerprint[index : index + 4] for index in range(0, len(fingerprint), 4)
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class Update:

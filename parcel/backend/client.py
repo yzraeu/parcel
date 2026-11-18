@@ -22,7 +22,15 @@ gi.require_version("PackageKitGlib", "1.0")
 from gi.repository import GLib, PackageKitGlib  # noqa: E402
 
 from parcel.backend.history import HistoryDatabase  # noqa: E402
-from parcel.backend.models import Package, Update  # noqa: E402
+from parcel.backend.models import (  # noqa: E402
+    Package,
+    Repo,
+    RepoPlan,
+    RepoRequest,
+    Update,
+)
+from parcel.backend.repo_files import is_system_repo  # noqa: E402
+from parcel.backend.repos import RepoManager  # noqa: E402
 from parcel.backend.rpmdb import RpmDatabase  # noqa: E402
 from parcel.backend.versioning import (  # noqa: E402
     compare,
@@ -56,10 +64,12 @@ class PackageKitClient:
         pk_client: Any = None,
         rpm_db: RpmDatabase | None = None,
         history: HistoryDatabase | None = None,
+        repos: RepoManager | None = None,
     ) -> None:
         self._client = pk_client if pk_client is not None else PackageKitGlib.Client()
         self._rpm = rpm_db if rpm_db is not None else RpmDatabase()
         self._history = history if history is not None else HistoryDatabase()
+        self._repos = repos if repos is not None else RepoManager()
         self._catalog: tuple[list[Package], list[Package]] | None = None
 
     # -- listings ---------------------------------------------------------
@@ -211,6 +221,55 @@ class PackageKitClient:
         self._check(results, packages[0])
         self.invalidate()
 
+    # -- repositories -----------------------------------------------------
+
+    def list_repos(self) -> list[Repo]:
+        """Every configured repository, distribution repos first."""
+        results = self._client.get_repo_list(_NO_FILTERS, None, _noop_progress, None)
+        repos = []
+        for detail in results.get_repo_detail_array():
+            repo_id = detail.get_id()
+            repos.append(
+                Repo(
+                    repo_id=repo_id,
+                    name=detail.get_description() or repo_id,
+                    enabled=detail.get_enabled(),
+                    system=is_system_repo(repo_id),
+                    copr=repo_id if repo_id.startswith("copr:") else "",
+                )
+            )
+        return sorted(
+            repos,
+            key=lambda repo: (not repo.system, repo.name.casefold(), repo.repo_id),
+        )
+
+    def prepare_repo(self, request: RepoRequest) -> RepoPlan:
+        """Download a new repo's signing key for the UI to show and confirm."""
+        return self._repos.prepare(request)
+
+    def add_repo(self, plan: RepoPlan) -> None:
+        """Install a repository whose key fingerprint the user confirmed."""
+        self._repos.add(plan)
+        self.invalidate()
+
+    def set_repo_enabled(self, repo: Repo, enabled: bool) -> None:
+        """Turn a repository on or off; packages stay installed either way."""
+        results = self._client.repo_enable(
+            repo.repo_id, enabled, None, _noop_progress, None
+        )
+        self._check_exit(results, f"the change to {repo.repo_id}")
+        self.invalidate()
+
+    def remove_repo(self, repo: Repo) -> None:
+        """Stop using a repository without uninstalling anything from it."""
+        if not repo.removable:
+            raise BackendError(f"{repo.name} is a system repository")
+        results = self._client.repo_remove(
+            _NO_FLAGS, repo.repo_id, False, None, _noop_progress, None
+        )
+        self._check_exit(results, f"the removal of {repo.repo_id}")
+        self.invalidate()
+
     # -- helpers ----------------------------------------------------------
 
     @staticmethod
@@ -221,11 +280,13 @@ class PackageKitClient:
 
     @staticmethod
     def _check(results: Any, package: Package) -> None:
+        PackageKitClient._check_exit(results, f"the transaction for {package.name}")
+
+    @staticmethod
+    def _check_exit(results: Any, what: str) -> None:
         exit_code = results.get_exit_code()
         if exit_code != PackageKitGlib.ExitEnum.SUCCESS:
-            raise BackendError(
-                f"PackageKit refused the transaction for {package.name} ({exit_code})"
-            )
+            raise BackendError(f"PackageKit refused {what} ({exit_code})")
 
     def _details(self, package_id: str) -> Any | None:
         if not package_id:
