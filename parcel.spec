@@ -23,6 +23,7 @@ BuildRequires:  libadwaita
 BuildRequires:  PackageKit-glib
 BuildRequires:  xorg-x11-server-Xvfb
 BuildRequires:  dbus-daemon
+BuildRequires:  gobject-introspection
 
 Requires:       python3
 Requires:       python3-gobject
@@ -34,6 +35,7 @@ Requires:       gnupg2
 Requires:       /usr/bin/dnf
 Requires:       /usr/bin/pkexec
 Requires:       /usr/bin/rpmkeys
+Requires:       gobject-introspection
 
 Recommends:     dnf-plugins-core
 
