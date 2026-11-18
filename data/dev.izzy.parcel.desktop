@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Parcel
+GenericName=Package Manager
+Comment=Browse, install, update, and remove Fedora packages
+Exec=parcel
+Icon=dev.izzy.parcel
+Terminal=false
+Categories=System;PackageManager;GTK;
+Keywords=package;dnf;rpm;software;update;
+StartupNotify=true

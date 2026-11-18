@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: >
+          dnf install -y
+          python3-pytest
+          ruff
+          python3-gobject
+          gtk4
+          libadwaita
+          PackageKit-glib
+          xorg-x11-server-Xvfb
+          dbus-daemon
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: xvfb-run -a dbus-run-session -- make test
