@@ -2,6 +2,6 @@
 
 APP_ID = "dev.izzy.parcel"
 APP_NAME = "Parcel"
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["APP_ID", "APP_NAME", "__version__"]

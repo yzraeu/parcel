@@ -4,7 +4,7 @@ A fast, simple, packages-only GUI for dnf on Fedora. Four tabs, a search
 box, one button per action. No app-store features: that is GNOME Software's
 job.
 
-Status: **v0.2.0 repo management**. Browse, search, install, remove, and update
+Status: **v0.3.0 spinners, lazy loading, and broader search**. Browse, search, install, remove, and update
 real packages through PackageKit, with a detail view for every package, a
 Repos tab that adds, removes, enables, and disables repositories, and an
 About dialog reachable from the header menu.
@@ -160,7 +160,7 @@ GPL-3.0-or-later. See [LICENSE](LICENSE).
 
 ## Fedora packaging
 
-`parcel.spec` builds the RPM. It needs a `v0.2.0` tag on GitHub,
+`parcel.spec` builds the RPM. It needs a `v0.3.0` tag on GitHub,
 because `Source0` is the release tarball for that tag.
 
 Build it locally, in a Fedora container (no sudo needed on the host):

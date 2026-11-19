@@ -1,5 +1,5 @@
 Name:           parcel
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        A fast, simple, packages-only GUI for dnf on Fedora
 
@@ -78,5 +78,7 @@ GSK_RENDERER=cairo xvfb-run -a dbus-run-session -- make test
 %{_datadir}/metainfo/dev.izzy.parcel.metainfo.xml
 
 %changelog
+* Thu Nov 19 2026 yzraeu <yzraeu@gmail.com> - 0.3.0-1
+- Spinners, lazy loading, and broader search
 * Wed Nov 18 2026 yzraeu <yzraeu@gmail.com> - 0.2.0-1
 - Initial package
