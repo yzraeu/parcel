@@ -37,9 +37,15 @@ class UpdatesPage(PackageListPage):
             empty_icon="software-update-available-symbolic",
         )
         self._on_update_all = on_update_all
+        self._busy = False
 
+        self.update_all_spinner = Gtk.Spinner(visible=False)
+        self.update_all_label = Gtk.Label(label="Update all")
+        button_content = Gtk.Box(spacing=6)
+        button_content.append(self.update_all_spinner)
+        button_content.append(self.update_all_label)
         self.update_all_button = Gtk.Button(
-            label="Update all",
+            child=button_content,
             valign=Gtk.Align.CENTER,
             sensitive=False,
         )
@@ -71,7 +77,21 @@ class UpdatesPage(PackageListPage):
                 for update in updates
             ]
         )
-        self.update_all_button.set_sensitive(bool(updates))
+        self.update_all_button.set_sensitive(bool(updates) and not self._busy)
+
+    def set_busy(self, busy: bool) -> None:
+        """Disable the bulk button and spin it while the transaction runs."""
+        self._busy = busy
+        self.update_all_button.set_sensitive(
+            not busy and bool(self.store.get_n_items())
+        )
+        self.update_all_spinner.set_visible(busy)
+        if busy:
+            self.update_all_spinner.start()
+        else:
+            self.update_all_spinner.stop()
 
     def _update_all_clicked(self, _button: Gtk.Button) -> None:
+        if self._busy:
+            return
         self._on_update_all()

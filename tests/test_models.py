@@ -111,6 +111,23 @@ def test_matches_searches_name_summary_repo_and_description() -> None:
     assert not package.matches("gimp")
 
 
+def test_matches_searches_version_and_packager() -> None:
+    package = make_package(
+        version="141.0.3-1.fc44",
+        packager="Fedora <packager@fedoraproject.org>",
+    )
+
+    assert package.matches("141.0")
+    assert package.matches("fedoraproject")
+
+
+def test_key_falls_back_to_name_and_version_without_a_package_id() -> None:
+    assert make_package(package_id="").key == "firefox;141.0.3-1.fc44"
+    assert make_package(package_id="firefox;141.0.3-1.fc44;x86_64;updates").key == (
+        "firefox;141.0.3-1.fc44;x86_64;updates"
+    )
+
+
 def test_empty_query_matches_everything() -> None:
     assert make_package().matches("   ")
 

@@ -25,6 +25,7 @@ from parcel.backend.models import (  # noqa: E402
     RepoRequest,
     Update,
 )
+from parcel.backend.rpmdb import InstalledMetadata  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -237,15 +238,26 @@ class FakeRpm:
         files: tuple[str, ...] = ("/usr/bin/thing",),
         required_by: tuple[str, ...] = ("nautilus",),
         changelog: str = "Maintainer - 1.0\n- fixed things",
+        packager: str = "Maintainer <m@example.org>",
+        description: str = "A useful package.",
     ) -> None:
         self.sizes = sizes or {}
         self._install_date = install_date
         self._files = files
         self._required_by = required_by
         self._changelog = changelog
+        self._packager = packager
+        self._description = description
 
-    def installed_sizes(self) -> dict[str, int]:
-        return dict(self.sizes)
+    def installed_metadata(self) -> dict[str, InstalledMetadata]:
+        return {
+            name: InstalledMetadata(
+                size=size,
+                packager=self._packager,
+                description=self._description,
+            )
+            for name, size in self.sizes.items()
+        }
 
     def install_date(self, _name: str) -> datetime | None:
         return self._install_date
@@ -368,6 +380,41 @@ def test_catalog_keeps_the_newest_version_per_name_and_arch() -> None:
     )
 
     assert [p.version for p in client.list_available()] == ["10.0-1.fc44"]
+
+
+def test_catalog_carries_rpmdb_packager_and_description_for_installed() -> None:
+    client, _ = make_client(packages=[installed("firefox")])
+
+    package = client.list_installed()[0]
+
+    assert package.size == 2048
+    assert package.packager == "Maintainer <m@example.org>"
+    assert package.description == "A useful package."
+
+
+def test_list_installed_does_not_build_available_packages() -> None:
+    class ExplodingAvailable(FakePackage):
+        def get_summary(self) -> str:
+            raise AssertionError("available package was built")
+
+    client, _ = make_client(packages=[installed("firefox"), ExplodingAvailable("gimp")])
+
+    assert [package.name for package in client.list_installed()] == ["firefox"]
+
+
+def test_list_available_does_not_build_installed_packages() -> None:
+    class ExplodingInstalled(FakePackage):
+        def get_summary(self) -> str:
+            raise AssertionError("installed package was built")
+
+    exploding = ExplodingInstalled(
+        "firefox",
+        repo="installed:updates",
+        info=PackageKitGlib.InfoEnum.INSTALLED,
+    )
+    client, _ = make_client(packages=[exploding, available("gimp")])
+
+    assert [package.name for package in client.list_available()] == ["gimp"]
 
 
 def test_list_updates_marks_security_and_reports_installed_versions() -> None:

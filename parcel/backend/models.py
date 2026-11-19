@@ -47,6 +47,7 @@ class Package:
     size: int = 0
     summary: str = ""
     description: str = ""
+    packager: str = ""
     license: str = ""
     installed: bool = False
     install_reason: InstallReason | None = None
@@ -56,6 +57,11 @@ class Package:
     changelog: str = ""
     homepage: str = ""
     package_id: str = ""
+
+    @property
+    def key(self) -> str:
+        """Stable identity for busy tracking when an id is missing."""
+        return self.package_id or f"{self.name};{self.version}"
 
     @property
     def size_text(self) -> str:
@@ -89,11 +95,26 @@ class Package:
         return f"{preview} (+{hidden} more)" if hidden > 0 else preview
 
     def matches(self, query: str) -> bool:
-        """True when the package is a match for a search query."""
+        """True when the package is a match for a search query.
+
+        Only fields that list items actually hold are searched. That is name,
+        summary, version, and repo for every package, plus the rpmdb
+        ``description`` and ``packager`` for installed packages. License and
+        homepage arrive only with ``get_detail()``, so they are not searched;
+        neither is the description of an available package, which PackageKit
+        does not include in its listing.
+        """
         term = query.strip().casefold()
         if not term:
             return True
-        haystack = (self.name, self.summary, self.repo, self.description)
+        haystack = (
+            self.name,
+            self.summary,
+            self.description,
+            self.packager,
+            self.version,
+            self.repo,
+        )
         return any(term in part.casefold() for part in haystack)
 
 

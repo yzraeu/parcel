@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from subprocess import run
 from sys import executable
@@ -113,10 +113,19 @@ class FakeClient:
         self.updated_calls: list[list[Package]] = []
 
     def catalog(self) -> tuple[list[Package], list[Package]]:
+        return self.list_installed(), self.list_available()
+
+    def list_installed(self) -> list[Package]:
         self.catalog_calls += 1
         if self.error is not None:
             raise self.error
-        return list(self.installed), list(self.available)
+        return list(self.installed)
+
+    def list_available(self) -> list[Package]:
+        self.catalog_calls += 1
+        if self.error is not None:
+            raise self.error
+        return list(self.available)
 
     def list_updates(
         self, installed_versions: Mapping[str, str] | None = None
@@ -168,6 +177,47 @@ def make_window(client: FakeClient | None = None, runner=None) -> MainWindow:
     )
 
 
+def open_tab(window: MainWindow, name: str) -> None:
+    """Select a tab, which triggers its first-view fetch."""
+    window.stack.set_visible_child_name(name)
+
+
+def flush_search(window: MainWindow) -> None:
+    window.search_debouncer.flush()
+
+
+class DeferredRunner:
+    """Holds callbacks so a test can inspect state while work is in flight."""
+
+    def __init__(self) -> None:
+        self.pending: list[
+            tuple[
+                Callable[[], object],
+                Callable[[object], None],
+                Callable[[Exception], None] | None,
+            ]
+        ] = []
+
+    def run(
+        self,
+        task: Callable[[], object],
+        on_done: Callable[[object], None],
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> None:
+        self.pending.append((task, on_done, on_error))
+
+    def flush(self) -> None:
+        pending, self.pending = self.pending, []
+        for task, on_done, on_error in pending:
+            try:
+                result = task()
+            except Exception as error:
+                if on_error is not None:
+                    on_error(error)
+            else:
+                on_done(result)
+
+
 def test_window_has_the_four_tabs() -> None:
     window = make_window()
 
@@ -176,6 +226,21 @@ def test_window_has_the_four_tabs() -> None:
         page = window.stack.get_child_by_name(name)
         assert page is not None, name
         assert window.stack.get_page(page).get_title() == title
+
+
+def test_tabs_show_spinners_while_their_first_load_is_pending() -> None:
+    runner = DeferredRunner()
+    window = MainWindow(client=FakeClient(), runner=runner)
+
+    for page in window.pages.values():
+        assert page.stack.get_visible_child_name() == "busy"
+        assert page.spinner.get_spinning()
+    assert window.repos_page.spinner.get_spinning()
+
+    runner.flush()
+
+    assert not window.installed_page.spinner.get_spinning()
+    assert not window.repos_page.spinner.get_spinning()
 
 
 def test_header_has_the_main_menu_with_an_about_entry() -> None:
@@ -221,15 +286,26 @@ def test_installed_tab_lists_real_client_data() -> None:
     assert window.stack.get_visible_child_name() == "installed"
 
 
-def test_available_tab_lists_not_installed_packages() -> None:
-    window = make_window()
+def test_available_tab_is_fetched_only_when_first_opened() -> None:
+    client = FakeClient()
+    window = make_window(client)
+
+    assert window.available_page.visible_count == 0
+    assert client.catalog_calls == 1
+
+    open_tab(window, "available")
 
     assert window.available_page.visible_count == 2
     assert window.available_page.action is RowAction.INSTALL
+    assert client.catalog_calls == 2
 
 
-def test_updates_tab_has_a_badge_with_the_count() -> None:
+def test_updates_tab_loads_on_first_view_and_sets_the_badge() -> None:
     window = make_window()
+
+    assert window.updates_page.visible_count == 0
+
+    open_tab(window, "updates")
 
     page = window.stack.get_page(window.updates_page)
     assert page.get_badge_number() == 2
@@ -237,11 +313,21 @@ def test_updates_tab_has_a_badge_with_the_count() -> None:
     assert window.updates_page.action is RowAction.UPDATE
 
 
-def test_installed_versions_are_handed_to_the_updates_query() -> None:
+def test_installed_tab_loads_at_startup() -> None:
     client = FakeClient()
     make_window(client)
 
-    assert client.version_maps == [{"firefox": "1.0-1.fc44", "flatpak": "1.0-1.fc44"}]
+    assert client.catalog_calls == 1
+    assert client.version_maps == []
+
+
+def test_updates_query_looks_up_installed_versions_on_first_view() -> None:
+    client = FakeClient()
+    window = make_window(client)
+
+    open_tab(window, "updates")
+
+    assert client.version_maps == [None]
 
 
 def test_window_has_the_search_bar_and_show_it_on_launch() -> None:
@@ -265,21 +351,44 @@ def test_search_toggle_controls_the_search_bar() -> None:
 
 def test_search_filters_only_the_current_tab() -> None:
     window = make_window()
+    open_tab(window, "available")
+    open_tab(window, "updates")
+    open_tab(window, "installed")
 
     window.search_entry.set_text("gimp")
     window.search_entry.emit("search-changed")
+    flush_search(window)
 
     assert window.installed_page.visible_count == 0
     assert window.available_page.visible_count == 2
     assert window.updates_page.visible_count == 2
 
 
+def test_search_shows_a_spinner_until_the_debounce_fires() -> None:
+    window = make_window()
+
+    window.search_entry.set_text("gimp")
+    window.search_entry.emit("search-changed")
+
+    assert window.search_debouncer.pending
+    assert window.installed_page.stack.get_visible_child_name() == "busy"
+    assert window.installed_page.busy_page.get_title() == "Searching\u2026"
+    assert window.installed_page.spinner.get_spinning()
+
+    flush_search(window)
+
+    assert not window.search_debouncer.pending
+    assert not window.installed_page.spinner.get_spinning()
+    assert window.installed_page.visible_count == 0
+
+
 def test_search_applies_to_the_tab_that_gets_selected() -> None:
     window = make_window()
     window.search_entry.set_text("firefox")
     window.search_entry.emit("search-changed")
+    flush_search(window)
 
-    window.stack.set_visible_child_name("updates")
+    open_tab(window, "updates")
 
     assert window.updates_page.visible_count == 1
     assert window.updates_page.filter_model.get_item(0).package.name == "firefox"
@@ -289,10 +398,12 @@ def test_clearing_search_restores_the_current_tab() -> None:
     window = make_window()
     window.search_entry.set_text("gimp")
     window.search_entry.emit("search-changed")
+    flush_search(window)
 
     window.search_entry.set_text("")
     window.search_entry.emit("search-changed")
 
+    assert not window.search_debouncer.pending
     assert window.installed_page.visible_count == 2
 
 
@@ -320,11 +431,71 @@ def test_update_action_sends_the_package(monkeypatch) -> None:
 def test_update_all_sends_every_offered_update(monkeypatch) -> None:
     client = FakeClient()
     window = make_window(client)
+    open_tab(window, "updates")
     monkeypatch.setattr(window, "_show_toast", lambda message: None)
 
     window._update_all()
 
     assert client.updated_calls == [[FIREFOX_UPDATE.package, NUATILUS_UPDATE.package]]
+
+
+def test_install_marks_the_row_busy_until_the_transaction_finishes(monkeypatch) -> None:
+    client = FakeClient()
+    runner = DeferredRunner()
+    window = MainWindow(client=client, runner=runner)
+    monkeypatch.setattr(window, "_show_toast", lambda message: None)
+    open_tab(window, "available")
+    runner.flush()
+
+    window._handle_action(GIMP, RowAction.INSTALL)
+
+    item = next(
+        window.available_page.store.get_item(index)
+        for index in range(window.available_page.store.get_n_items())
+        if window.available_page.store.get_item(index).package == GIMP
+    )
+    assert item.busy
+    assert GIMP.key in window._busy_keys
+
+    runner.flush()
+
+    assert not item.busy
+    assert GIMP.key not in window._busy_keys
+
+
+def test_second_click_while_a_transaction_runs_does_nothing(monkeypatch) -> None:
+    client = FakeClient()
+    runner = DeferredRunner()
+    window = MainWindow(client=client, runner=runner)
+    monkeypatch.setattr(window, "_show_toast", lambda message: None)
+    runner.flush()
+
+    window._handle_action(GIMP, RowAction.INSTALL)
+    window._handle_action(GIMP, RowAction.INSTALL)
+    runner.flush()
+
+    assert client.installed_calls == [GIMP]
+
+
+def test_update_all_disables_its_button_while_running(monkeypatch) -> None:
+    client = FakeClient()
+    runner = DeferredRunner()
+    window = MainWindow(client=client, runner=runner)
+    monkeypatch.setattr(window, "_show_toast", lambda message: None)
+    open_tab(window, "updates")
+    runner.flush()
+
+    window._update_all()
+
+    assert not window.updates_page.update_all_button.get_sensitive()
+    assert window.updates_page.update_all_spinner.get_visible()
+    assert window.updates_page.update_all_spinner.get_spinning()
+
+    runner.flush()
+
+    assert window.updates_page.update_all_button.get_sensitive()
+    assert not window.updates_page.update_all_spinner.get_visible()
+    assert not window.updates_page.update_all_spinner.get_spinning()
 
 
 def test_remove_asks_for_confirmation_before_uninstalling(monkeypatch) -> None:
@@ -382,6 +553,7 @@ def test_failed_transaction_reports_a_toast(monkeypatch) -> None:
         "Installing gimp\u2026",
         "Could not install gimp: polkit said no",
     ]
+    assert GIMP.key not in window._busy_keys
 
 
 def test_expanding_a_row_loads_its_detail() -> None:

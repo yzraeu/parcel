@@ -84,3 +84,23 @@ def test_update_all_button_calls_the_handler() -> None:
     page.update_all_button.emit("clicked")
 
     assert update_all == [True]
+
+
+def test_busy_update_all_button_spins_and_ignores_clicks() -> None:
+    page, _actions, update_all = make_page()
+    page.set_updates([make_update("firefox")])
+
+    page.set_busy(True)
+
+    assert not page.update_all_button.get_sensitive()
+    assert page.update_all_spinner.get_visible()
+    assert page.update_all_spinner.get_spinning()
+
+    page.update_all_button.emit("clicked")
+    assert update_all == []
+
+    page.set_busy(False)
+
+    assert page.update_all_button.get_sensitive()
+    assert not page.update_all_spinner.get_visible()
+    assert not page.update_all_spinner.get_spinning()

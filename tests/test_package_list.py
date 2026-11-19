@@ -38,10 +38,52 @@ def make_page(**kwargs: object) -> PackageListPage:
     return page
 
 
-def test_page_starts_in_its_loading_state() -> None:
+def test_page_starts_in_its_loading_state_with_a_spinner() -> None:
     page = make_page()
-    assert page.stack.get_visible_child_name() == "empty"
-    assert page.empty_page.get_title() == "Loading packages\u2026"
+    assert page.stack.get_visible_child_name() == "busy"
+    assert page.busy_page.get_title() == "Loading packages\u2026"
+    assert page.spinner.get_spinning()
+
+
+def test_finishing_the_load_stops_the_spinner() -> None:
+    page = make_page(empty_title="No packages")
+
+    page.set_loading(False)
+
+    assert not page.spinner.get_spinning()
+
+
+def test_searching_state_is_a_spinner_until_the_filter_is_applied() -> None:
+    page = make_page()
+    page.set_packages([make_package()])
+    page.set_loading(False)
+
+    page.set_searching(True)
+
+    assert page.stack.get_visible_child_name() == "busy"
+    assert page.busy_page.get_title() == "Searching\u2026"
+    assert page.spinner.get_spinning()
+
+    page.set_filter("firefox")
+
+    assert not page.spinner.get_spinning()
+    assert page.stack.get_visible_child_name() == "list"
+
+
+def test_busy_items_are_marked_by_package_key() -> None:
+    page = make_page()
+    page.set_packages([make_package(), make_package(name="gimp")])
+    page.set_loading(False)
+    firefox = page.store.get_item(0).package
+
+    page.set_package_busy(firefox.key, True)
+
+    assert page.store.get_item(0).busy
+    assert not page.store.get_item(1).busy
+
+    page.set_package_busy(firefox.key, False)
+
+    assert not page.store.get_item(0).busy
 
 
 def test_finishing_the_load_shows_the_configured_empty_state() -> None:

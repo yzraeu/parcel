@@ -55,6 +55,8 @@ class PackageRow(Gtk.Box):
         self.item: PackageItem | None = None
         self.detail: PackageDetail | None = None
         self._subtitle_binding: GObject.Binding | None = None
+        self._busy_handler: int = 0
+        self._busy = False
         self._expanded_id: str | None = None
 
         self.header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -98,8 +100,13 @@ class PackageRow(Gtk.Box):
             tooltip_text="Security update",
         )
 
+        self.action_icon = Gtk.Image(icon_name=action.icon_name)
+        self.action_spinner = Gtk.Spinner()
+        self.action_stack = Gtk.Stack()
+        self.action_stack.add_named(self.action_icon, "icon")
+        self.action_stack.add_named(self.action_spinner, "spinner")
         self.action_button = Gtk.Button(
-            icon_name=action.icon_name,
+            child=self.action_stack,
             tooltip_text=action.label,
             valign=Gtk.Align.CENTER,
         )
@@ -132,6 +139,8 @@ class PackageRow(Gtk.Box):
             GObject.BindingFlags.SYNC_CREATE,
         )
         self.security_label.set_visible(item.security)
+        self._busy_handler = item.connect("notify::busy", self._item_busy_changed)
+        self._apply_busy(item.busy)
         self.revealer.set_reveal_child(False)
         self.chevron.set_from_icon_name("pan-down-symbolic")
         self._set_detail_widget(None)
@@ -143,6 +152,10 @@ class PackageRow(Gtk.Box):
         if self._subtitle_binding is not None:
             self._subtitle_binding.unbind()
             self._subtitle_binding = None
+        if self._busy_handler and self.item is not None:
+            self.item.disconnect(self._busy_handler)
+        self._busy_handler = 0
+        self._apply_busy(False)
         self.item = None
         self.detail = None
         self._expanded_id = None
@@ -189,6 +202,25 @@ class PackageRow(Gtk.Box):
         if widget is not None:
             self.detail_slot.append(widget)
 
+    def set_busy(self, busy: bool) -> None:
+        """Show a spinner instead of the action icon while work runs."""
+        self._apply_busy(busy)
+
+    def _item_busy_changed(self, item: PackageItem, _property: object = None) -> None:
+        if item is self.item:
+            self._apply_busy(item.busy)
+
+    def _apply_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self.action_button.set_sensitive(not busy)
+        if busy:
+            self.action_stack.set_visible_child_name("spinner")
+            self.action_spinner.start()
+        else:
+            self.action_spinner.stop()
+            self.action_stack.set_visible_child_name("icon")
+
     def _handle_action(self, _button: Gtk.Button) -> None:
-        if self.item is not None:
-            self._on_action(self.item.package)
+        if self._busy or self.item is None:
+            return
+        self._on_action(self.item.package)

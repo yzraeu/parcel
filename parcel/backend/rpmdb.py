@@ -8,10 +8,20 @@ the live database.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 import rpm as _rpm
+
+
+@dataclass(frozen=True, slots=True)
+class InstalledMetadata:
+    """What the rpmdb adds to every installed package, in one header walk."""
+
+    size: int = 0
+    packager: str = ""
+    description: str = ""
 
 
 class RpmDatabase:
@@ -20,12 +30,16 @@ class RpmDatabase:
     def __init__(self, rpm_module: Any = None) -> None:
         self._rpm = rpm_module if rpm_module is not None else _rpm
 
-    def installed_sizes(self) -> dict[str, int]:
-        """Installed size in bytes for every installed package, by name."""
-        sizes: dict[str, int] = {}
+    def installed_metadata(self) -> dict[str, InstalledMetadata]:
+        """Size, packager, and description for every installed package, by name."""
+        metadata: dict[str, InstalledMetadata] = {}
         for header in self._rpm.TransactionSet().dbMatch():
-            sizes[header["name"]] = int(header["size"] or 0)
-        return sizes
+            metadata[header["name"]] = InstalledMetadata(
+                size=int(header["size"] or 0),
+                packager=str(_optional(header, "packager") or ""),
+                description=str(_optional(header, "description") or ""),
+            )
+        return metadata
 
     def install_date(self, name: str) -> datetime | None:
         header = self._header(name)
@@ -78,6 +92,14 @@ class RpmDatabase:
     def _header(self, name: str) -> Any | None:
         for header in self._rpm.TransactionSet().dbMatch("name", name):
             return header
+        return None
+
+
+def _optional(header: Any, key: str) -> Any | None:
+    """Read a tag that older rpm builds may not carry."""
+    try:
+        return header[key]
+    except (KeyError, TypeError):
         return None
 
 

@@ -26,11 +26,20 @@ def make_page() -> ReposPage:
     return page
 
 
-def test_page_starts_loading() -> None:
+def test_page_starts_loading_with_a_spinner() -> None:
     page = make_page()
 
-    assert page.stack.get_visible_child_name() == "empty"
-    assert page.empty_page.get_title() == "Loading repositories\u2026"
+    assert page.stack.get_visible_child_name() == "busy"
+    assert page.busy_page.get_title() == "Loading repositories\u2026"
+    assert page.spinner.get_spinning()
+
+
+def test_loading_the_repositories_stops_the_spinner() -> None:
+    page = make_page()
+
+    page.set_repos([FEDORA])
+
+    assert not page.spinner.get_spinning()
 
 
 def test_loaded_repositories_get_a_row_and_a_switch() -> None:

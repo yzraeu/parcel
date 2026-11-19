@@ -42,6 +42,8 @@ def header_for(**overrides: Any) -> dict[str, Any]:
         "installtime": 1794285711,
         "filenames": ["/usr/bin/bash", "/etc/bashrc"],
         "providename": ["/bin/sh", "bash"],
+        "packager": "Fedora <packager@fedoraproject.org>",
+        "description": "The GNU Bourne Again shell.",
         "changelogtext": ["- newest entry", "- older entry"],
         "changelogtime": [1_800_000_000, 1_700_000_000],
         "changelogname": ["Maintainer <m@example.org> - 5.3-2", "Old <o@example.org>"],
@@ -50,9 +52,26 @@ def header_for(**overrides: Any) -> dict[str, Any]:
     return header
 
 
-def test_installed_sizes_maps_names_to_bytes() -> None:
+def test_installed_metadata_reads_size_packager_and_description() -> None:
     rpm = FakeRpm([header_for(), header_for(name="glibc", size=0)])
-    assert RpmDatabase(rpm).installed_sizes() == {"bash": 8865529, "glibc": 0}
+
+    metadata = RpmDatabase(rpm).installed_metadata()
+
+    assert metadata["bash"].size == 8865529
+    assert metadata["bash"].packager == "Fedora <packager@fedoraproject.org>"
+    assert metadata["bash"].description == "The GNU Bourne Again shell."
+    assert metadata["glibc"].size == 0
+
+
+def test_installed_metadata_tolerates_missing_packager_and_description() -> None:
+    header = header_for()
+    del header["packager"]
+    del header["description"]
+
+    metadata = RpmDatabase(FakeRpm([header])).installed_metadata()
+
+    assert metadata["bash"].packager == ""
+    assert metadata["bash"].description == ""
 
 
 def test_install_date_comes_from_the_header() -> None:

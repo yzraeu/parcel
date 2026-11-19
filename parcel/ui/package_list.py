@@ -45,6 +45,7 @@ class PackageListPage(Gtk.Box):
         self._empty_icon = empty_icon
         self._query = ""
         self._loading = True
+        self._searching = False
 
         self.store = Gio.ListStore(item_type=PackageItem)
         self.filter_model = Gtk.FilterListModel(model=self.store)
@@ -75,7 +76,12 @@ class PackageListPage(Gtk.Box):
             title=empty_title,
             description=empty_description,
         )
+        self.spinner = Gtk.Spinner()
+        self.spinner.set_size_request(32, 32)
+        self.busy_page = Adw.StatusPage(title="Loading packages\u2026")
+        self.busy_page.set_child(self.spinner)
         self.stack = Gtk.Stack()
+        self.stack.add_named(self.busy_page, "busy")
         self.stack.add_named(self.scroller, "list")
         self.stack.add_named(self.empty_page, "empty")
         self.append(self.stack)
@@ -97,9 +103,23 @@ class PackageListPage(Gtk.Box):
         self._loading = loading
         self._refresh()
 
+    def set_searching(self, searching: bool) -> None:
+        """Show a spinner while the debounced query is reduced over the list."""
+        self._searching = searching
+        self._refresh()
+
+    def set_package_busy(self, package_key: str, busy: bool) -> None:
+        """Mark the item for ``package_key`` busy so its row shows a spinner."""
+        for index in range(self.store.get_n_items()):
+            item = self.store.get_item(index)
+            if item.package.key == package_key:
+                item.busy = busy
+                return
+
     def set_filter(self, query: str) -> None:
         """Show only items matching ``query``; an empty query shows everything."""
         self._query = query
+        self._searching = False
         self.filter_model.set_filter(Gtk.CustomFilter.new(self._matches))
         self._refresh()
 
@@ -110,13 +130,26 @@ class PackageListPage(Gtk.Box):
     def _matches(self, item: PackageItem) -> bool:
         return item.package.matches(self._query)
 
+    def _show_busy_page(self, title: str, description: str) -> None:
+        self.busy_page.set_icon_name("")
+        self.busy_page.set_title(title)
+        self.busy_page.set_description(description)
+        self.spinner.start()
+        self.stack.set_visible_child_name("busy")
+
     def _refresh(self) -> None:
-        if self._loading and self.filter_model.get_n_items() == 0:
-            self.empty_page.set_icon_name("content-loading-symbolic")
-            self.empty_page.set_title("Loading packages\u2026")
-            self.empty_page.set_description("Reading the package list from PackageKit.")
-            self.stack.set_visible_child_name("empty")
+        if self._searching:
+            self._show_busy_page(
+                "Searching\u2026", "Matching packages against the search text."
+            )
             return
+        if self._loading and self.filter_model.get_n_items() == 0:
+            self._show_busy_page(
+                "Loading packages\u2026",
+                "Reading the package list from PackageKit.",
+            )
+            return
+        self.spinner.stop()
         has_rows = self.filter_model.get_n_items() > 0
         if has_rows:
             self.stack.set_visible_child_name("list")

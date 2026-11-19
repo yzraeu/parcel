@@ -25,6 +25,16 @@ class PackageItem(GObject.Object):
         self.version_text = version_text or package.version
         self.security = security
         self.size = package.size
+        self._busy = False
+
+    @GObject.Property(type=bool, default=False)
+    def busy(self) -> bool:
+        """True while a transaction for this package is running."""
+        return self._busy
+
+    @busy.setter
+    def busy(self, value: bool) -> None:
+        self._busy = bool(value)
 
     @GObject.Property(type=str)
     def subtitle(self) -> str:

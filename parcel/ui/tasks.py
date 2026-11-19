@@ -43,6 +43,52 @@ class SyncRunner:
         on_done(result)
 
 
+class Debouncer:
+    """Coalesce rapid calls into one callback after a quiet period.
+
+    ``flush`` runs a pending callback immediately, which keeps search tests
+    deterministic without spinning a main loop.
+    """
+
+    def __init__(
+        self,
+        callback: Callable[[], None],
+        delay_ms: int = 200,
+        add: Callable[[int, Callable[[], bool]], int] | None = None,
+        remove: Callable[[int], bool] | None = None,
+    ) -> None:
+        self._callback = callback
+        self._delay_ms = delay_ms
+        self._add = add if add is not None else GLib.timeout_add
+        self._remove = remove if remove is not None else GLib.source_remove
+        self._source: int | None = None
+
+    @property
+    def pending(self) -> bool:
+        return self._source is not None
+
+    def schedule(self) -> None:
+        """Restart the quiet period."""
+        self.cancel()
+        self._source = self._add(self._delay_ms, self._fire)
+
+    def cancel(self) -> None:
+        if self._source is not None:
+            self._remove(self._source)
+            self._source = None
+
+    def flush(self) -> None:
+        """Run a pending callback now."""
+        if self._source is not None:
+            self.cancel()
+            self._callback()
+
+    def _fire(self) -> bool:
+        self._source = None
+        self._callback()
+        return GLib.SOURCE_REMOVE
+
+
 class AsyncRunner:
     """Runs tasks on a worker thread and delivers results on the main loop."""
 

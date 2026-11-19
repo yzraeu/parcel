@@ -70,45 +70,64 @@ class PackageKitClient:
         self._rpm = rpm_db if rpm_db is not None else RpmDatabase()
         self._history = history if history is not None else HistoryDatabase()
         self._repos = repos if repos is not None else RepoManager()
-        self._catalog: tuple[list[Package], list[Package]] | None = None
+        # One unfiltered listing feeds both lists; each list is only built when
+        # first requested, so startup does not pay for the available catalog.
+        self._raw: list[tuple[Any, Any]] | None = None
+        self._installed: list[Package] | None = None
+        self._available: list[Package] | None = None
 
     # -- listings ---------------------------------------------------------
 
     def catalog(self) -> tuple[list[Package], list[Package]]:
         """``(installed, available)`` packages, one entry per name and arch.
 
-        The full listing is fetched once and cached; transactions call
-        :meth:`invalidate`.
+        The raw Listing is fetched once and cached; each half is reduced on
+        first request. Transactions call :meth:`invalidate`.
         """
-        if self._catalog is None:
-            results = self._client.get_packages(_NO_FILTERS, None, _noop_progress, None)
-            installed_sizes = self._rpm.installed_sizes()
-            installed: list[Package] = []
-            available: list[Package] = []
-            for pkg in results.get_package_array():
-                if pkg.get_arch() in _SOURCE_ARCHES:
-                    continue
-                info = pkg.get_info()
-                if info == PackageKitGlib.InfoEnum.INSTALLED:
-                    package = self._to_package(
-                        pkg, installed=True, size=installed_sizes.get(pkg.get_name(), 0)
-                    )
-                    installed.append(package)
-                elif info == PackageKitGlib.InfoEnum.AVAILABLE:
-                    available.append(self._to_package(pkg, installed=False, size=0))
-            self._catalog = (
-                sort_packages(dedupe_latest(installed)),
-                sort_packages(dedupe_latest(available)),
-            )
-        return self._catalog
+        return self.list_installed(), self.list_available()
 
     def list_installed(self) -> list[Package]:
         """Packages currently installed on the system."""
-        return list(self.catalog()[0])
+        if self._installed is None:
+            metadata = self._rpm.installed_metadata()
+            packages = []
+            for pkg, info in self._raw_packages():
+                if info != PackageKitGlib.InfoEnum.INSTALLED:
+                    continue
+                meta = metadata.get(pkg.get_name())
+                packages.append(
+                    self._to_package(
+                        pkg,
+                        installed=True,
+                        size=meta.size if meta else 0,
+                        packager=meta.packager if meta else "",
+                        description=meta.description if meta else "",
+                    )
+                )
+            self._installed = sort_packages(dedupe_latest(packages))
+        return list(self._installed)
 
     def list_available(self) -> list[Package]:
         """Packages offered by the configured repositories, not installed."""
-        return list(self.catalog()[1])
+        if self._available is None:
+            packages = [
+                self._to_package(pkg, installed=False, size=0)
+                for pkg, info in self._raw_packages()
+                if info == PackageKitGlib.InfoEnum.AVAILABLE
+            ]
+            self._available = sort_packages(dedupe_latest(packages))
+        return list(self._available)
+
+    def _raw_packages(self) -> list[tuple[Any, Any]]:
+        """Every non-source package from one unfiltered ``get_packages`` call."""
+        if self._raw is None:
+            results = self._client.get_packages(_NO_FILTERS, None, _noop_progress, None)
+            self._raw = [
+                (pkg, pkg.get_info())
+                for pkg in results.get_package_array()
+                if pkg.get_arch() not in _SOURCE_ARCHES
+            ]
+        return self._raw
 
     def list_updates(
         self, installed_versions: Mapping[str, str] | None = None
@@ -139,8 +158,10 @@ class PackageKitClient:
         )
 
     def invalidate(self) -> None:
-        """Forget the cached catalog; the next listing hits PackageKit again."""
-        self._catalog = None
+        """Forget the cached listings; the next listing hits PackageKit again."""
+        self._raw = None
+        self._installed = None
+        self._available = None
 
     # -- details ----------------------------------------------------------
 
@@ -315,7 +336,13 @@ class PackageKitClient:
         return details[0].get_changelog() if details else ""
 
     @staticmethod
-    def _to_package(pkg: Any, installed: bool, size: int) -> Package:
+    def _to_package(
+        pkg: Any,
+        installed: bool,
+        size: int,
+        packager: str = "",
+        description: str = "",
+    ) -> Package:
         arch = pkg.get_arch()
         return Package(
             name=pkg.get_name(),
@@ -324,6 +351,8 @@ class PackageKitClient:
             arch=arch,
             size=size,
             summary=pkg.get_summary(),
+            description=description,
+            packager=packager,
             installed=installed,
             package_id=pkg.get_id(),
         )

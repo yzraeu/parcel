@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Protocol
+from typing import Any, Protocol
 
 import gi
 
@@ -38,6 +38,20 @@ _ACTION_WORDS = {
     RowAction.UPDATE: ("Updating", "Updated", "update"),
 }
 
+# The list a row belongs to; busy state only needs to be pushed there.
+_ACTION_PAGES = {
+    RowAction.INSTALL: "available",
+    RowAction.REMOVE: "installed",
+    RowAction.UPDATE: "updates",
+}
+
+# Which backend call fills a tab. Tabs are fetched on first view.
+_PAGE_LOADERS = {
+    "installed": "list_installed",
+    "available": "list_available",
+    "updates": "list_updates",
+}
+
 
 class PackageBackend(Protocol):
     """The slice of the backend client the window needs.
@@ -45,7 +59,9 @@ class PackageBackend(Protocol):
     Keeping it explicit documents the seam: the UI never imports PackageKit.
     """
 
-    def catalog(self) -> tuple[list[Package], list[Package]]: ...
+    def list_installed(self) -> list[Package]: ...
+
+    def list_available(self) -> list[Package]: ...
 
     def list_updates(
         self, installed_versions: Mapping[str, str] | None = None
@@ -79,6 +95,7 @@ class MainWindow(Adw.ApplicationWindow):
         self,
         client: PackageBackend,
         runner: tasks.Runner | None = None,
+        search_delay_ms: int = 200,
         **kwargs: object,
     ) -> None:
         super().__init__(
@@ -91,6 +108,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._runner = runner if runner is not None else tasks.AsyncRunner()
         self._size_loader = SizeLoader(client.sizes, self._runner)
         self._updates: list[Update] = []
+        self._loaded_pages: set[str] = set()
+        self._loading_pages: set[str] = set()
+        self._busy_keys: set[str] = set()
+        self.search_debouncer = tasks.Debouncer(self._run_search, search_delay_ms)
         self.remove_dialog: Adw.AlertDialog | None = None
         self.add_repo_dialog: AddRepoDialog | None = None
         self.about_dialog: Adw.AboutDialog | None = None
@@ -189,33 +210,58 @@ class MainWindow(Adw.ApplicationWindow):
     # -- loading -----------------------------------------------------------
 
     def _load(self) -> None:
-        for page in self.pages.values():
-            page.set_loading(True)
-        self.repos_page.set_loading(True)
-        self._runner.run(self._fetch, self._loaded, self._load_failed)
+        """Fetch the tab on screen at startup; other tabs load on first view.
+
+        Measured here against live PackageKit (74.5k available packages): the
+        unfiltered ``get_packages`` call takes 1381 ms, reducing the installed
+        half (including the rpmdb metadata walk) 443 ms, the available half
+        277 ms, building 74.5k ``PackageItem``s 82 ms, one ``splice()`` 10 ms,
+        and the first list layout about 890 ms. Deferring Available and
+        Updates to their first view keeps roughly 1.3 s of build, splice, and
+        layout off startup. The unfiltered fetch itself stays: PackageKit's
+        server-side filters are not dependable here (see ``client.py``).
+        """
+        self._load_page("installed")
         self._load_repos()
 
-    def _fetch(self) -> tuple[list[Package], list[Package], list[Update]]:
-        installed, available = self.client.catalog()
-        versions = {package.name: package.version for package in installed}
-        updates = self.client.list_updates(versions)
-        return installed, available, updates
+    def _load_page(self, name: str, force: bool = False) -> None:
+        if name in self._loading_pages:
+            return
+        if not force and name in self._loaded_pages:
+            return
+        page = self.pages[name]
+        self._loading_pages.add(name)
+        page.set_loading(True)
+        loader = getattr(self.client, _PAGE_LOADERS[name])
+        self._runner.run(
+            loader,
+            lambda data: self._page_loaded(name, data),
+            lambda error: self._page_failed(name, error),
+        )
 
-    def _loaded(self, data: tuple[list[Package], list[Package], list[Update]]) -> None:
-        installed, available, updates = data
-        self._updates = list(updates)
-        self.installed_page.set_packages(installed)
-        self.available_page.set_packages(available)
-        self.updates_page.set_updates(updates)
-        for page in self.pages.values():
-            page.set_loading(False)
-        self.stack.get_page(self.updates_page).set_badge_number(len(updates))
-        self._apply_search_to_current()
+    def _page_loaded(self, name: str, data: Any) -> None:
+        self._loading_pages.discard(name)
+        self._loaded_pages.add(name)
+        page = self.pages[name]
+        if name == "updates":
+            self._updates = list(data)
+            page.set_updates(data)
+            self.stack.get_page(page).set_badge_number(len(self._updates))
+        else:
+            page.set_packages(data)
+        page.set_loading(False)
+        if page is self._current_page():
+            page.set_filter(self.search_entry.get_text())
 
-    def _load_failed(self, error: Exception) -> None:
-        for page in self.pages.values():
-            page.set_loading(False)
+    def _page_failed(self, name: str, error: Exception) -> None:
+        self._loading_pages.discard(name)
+        self.pages[name].set_loading(False)
         self._show_toast(f"Could not load packages: {error}")
+
+    def _refresh_loaded(self) -> None:
+        """Refetch the tabs that have been opened; leave the rest untouched."""
+        for name in sorted(self._loaded_pages):
+            self._load_page(name, force=True)
 
     def _load_repos(self) -> None:
         self.repos_page.set_loading(True)
@@ -232,9 +278,34 @@ class MainWindow(Adw.ApplicationWindow):
     # -- search ------------------------------------------------------------
 
     def _on_search_changed(self, _entry: Gtk.SearchEntry) -> None:
-        self._apply_search_to_current()
+        page = self._current_page()
+        if page is None:
+            return
+        if not self.search_entry.get_text().strip():
+            self.search_debouncer.cancel()
+            page.set_searching(False)
+            page.set_filter("")
+            return
+        # Show the spinner while the quiet period runs; the filter itself is
+        # applied on the main loop after the debounce so typing stays smooth.
+        # Re-filtering all 74.5k available rows takes ~70 ms here, hence the
+        # 200 ms debounce instead of one pass per keystroke.
+        page.set_searching(True)
+        self.search_debouncer.schedule()
+
+    def _run_search(self) -> None:
+        page = self._current_page()
+        if page is not None:
+            page.set_searching(False)
+            page.set_filter(self.search_entry.get_text())
 
     def _on_page_changed(self, *_args: object) -> None:
+        self.search_debouncer.cancel()
+        for page in self.pages.values():
+            page.set_searching(False)
+        name = self.stack.get_visible_child_name() or ""
+        if name in self.pages:
+            self._load_page(name)
         self._apply_search_to_current()
 
     def _current_page(self) -> PackageListPage | None:
@@ -248,25 +319,30 @@ class MainWindow(Adw.ApplicationWindow):
     # -- actions -----------------------------------------------------------
 
     def _handle_action(self, package: Package, action: RowAction) -> None:
+        if self._is_busy(package):
+            return
         words = _ACTION_WORDS[action]
+        page = _ACTION_PAGES[action]
         if action is RowAction.REMOVE:
             self._confirm_remove(package)
         elif action is RowAction.INSTALL:
-            self._run(package, words, lambda: self.client.install(package))
+            self._run([package], words, lambda: self.client.install(package), page)
         elif action is RowAction.UPDATE:
             self._run(
-                package,
+                [package],
                 words,
                 lambda: self.client.update([package]),
+                page,
             )
 
     def _confirm_remove(self, package: Package) -> None:
         dialog = build_remove_dialog(
             package,
             lambda: self._run(
-                package,
+                [package],
                 _ACTION_WORDS[RowAction.REMOVE],
                 lambda: self.client.remove(package),
+                "installed",
             ),
         )
         self.remove_dialog = dialog
@@ -276,11 +352,14 @@ class MainWindow(Adw.ApplicationWindow):
         packages = [update.package for update in self._updates]
         if not packages:
             return
+        self.updates_page.set_busy(True)
         self._run(
-            None,
+            packages,
             _ACTION_WORDS[RowAction.UPDATE],
             lambda: self.client.update(packages),
+            "updates",
             target="all packages",
+            on_finished=lambda: self.updates_page.set_busy(False),
         )
 
     def _expand(
@@ -295,25 +374,58 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._runner.run(lambda: self.client.get_detail(package), show_detail, failed)
 
+    def _is_busy(self, package: Package) -> bool:
+        return package.key in self._busy_keys
+
+    def _set_busy(
+        self, packages: Sequence[Package], busy: bool, page_name: str
+    ) -> None:
+        page = self.pages[page_name]
+        for package in packages:
+            if busy:
+                self._busy_keys.add(package.key)
+            else:
+                self._busy_keys.discard(package.key)
+            page.set_package_busy(package.key, busy)
+
     def _run(
         self,
-        package: Package | None,
+        packages: Sequence[Package],
         words: tuple[str, str, str],
         operation: Callable[[], None],
+        page_name: str,
         target: str | None = None,
+        on_finished: Callable[[], None] | None = None,
     ) -> None:
         busy, done, verb = words
-        name = target or (package.name if package is not None else "packages")
+        name = target or (packages[0].name if packages else "packages")
+        # A second click while the first transaction runs must not start it
+        # again; the row spinner is feedback, this is the actual guard.
+        if not packages or any(self._is_busy(package) for package in packages):
+            if on_finished is not None:
+                on_finished()
+            return
+        self._set_busy(packages, True, page_name)
         self._show_toast(f"{busy} {name}\u2026")
-        self._runner.run(
-            operation,
-            lambda _result: self._transaction_done(done, name),
-            lambda error: self._show_toast(f"Could not {verb} {name}: {error}"),
-        )
+
+        def finish() -> None:
+            self._set_busy(packages, False, page_name)
+            if on_finished is not None:
+                on_finished()
+
+        def completed(_result: object) -> None:
+            finish()
+            self._transaction_done(done, name)
+
+        def failed(error: Exception) -> None:
+            finish()
+            self._show_toast(f"Could not {verb} {name}: {error}")
+
+        self._runner.run(operation, completed, failed)
 
     def _transaction_done(self, done: str, target: str) -> None:
         self._show_toast(f"{done} {target}")
-        self._load()
+        self._refresh_loaded()
 
     # -- repositories ------------------------------------------------------
 
@@ -333,7 +445,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._show_toast(message)
         # The available package list and the updates list both depend on the
         # repositories that are enabled.
-        self._load()
+        self._refresh_loaded()
+        self._load_repos()
 
     def _repo_action_failed(self, verb: str, repo: Repo, error: Exception) -> None:
         self._show_toast(f"Could not {verb} {repo.name}: {error}")
@@ -354,7 +467,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _repo_removed(self, repo: Repo) -> None:
         self._show_toast(f"Removed {repo.name}")
-        self._load()
+        self._refresh_loaded()
+        self._load_repos()
 
     def _add_repo(self) -> None:
         dialog = AddRepoDialog(
@@ -381,7 +495,8 @@ class MainWindow(Adw.ApplicationWindow):
     def _repo_added(self, dialog: AddRepoDialog, plan: RepoPlan) -> None:
         dialog.close()
         self._show_toast(f"Added {plan.name}")
-        self._load()
+        self._refresh_loaded()
+        self._load_repos()
 
     def _show_toast(self, message: str) -> None:
         self.toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))

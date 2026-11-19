@@ -75,7 +75,8 @@ def test_version_text_can_show_an_update_transition() -> None:
 def test_install_action_icon_and_no_destructive_style() -> None:
     harness = Harness(action=RowAction.INSTALL)
 
-    assert harness.row.action_button.get_icon_name() == "folder-download-symbolic"
+    assert harness.row.action_stack.get_visible_child_name() == "icon"
+    assert harness.row.action_icon.get_icon_name() == "folder-download-symbolic"
     assert harness.row.action_button.get_tooltip_text() == "Install"
     assert not harness.row.action_button.has_css_class("destructive-action")
 
@@ -83,13 +84,13 @@ def test_install_action_icon_and_no_destructive_style() -> None:
 def test_remove_action_is_a_destructive_trash_can_icon() -> None:
     harness = Harness(action=RowAction.REMOVE)
 
-    assert harness.row.action_button.get_icon_name() == "user-trash-symbolic"
+    assert harness.row.action_icon.get_icon_name() == "user-trash-symbolic"
     assert harness.row.action_button.has_css_class("destructive-action")
 
 
 def test_update_action_icon() -> None:
     harness = Harness(action=RowAction.UPDATE)
-    assert harness.row.action_button.get_icon_name() == (
+    assert harness.row.action_icon.get_icon_name() == (
         "software-update-available-symbolic"
     )
 
@@ -115,6 +116,52 @@ def test_action_button_forwards_the_bound_package() -> None:
 def test_action_without_a_bound_item_is_harmless() -> None:
     row = PackageRow(RowAction.INSTALL, lambda package: None, lambda package, cb: None)
     row.action_button.emit("clicked")
+
+
+def test_busy_row_shows_a_spinner_and_refuses_clicks() -> None:
+    package = make_package()
+    harness = Harness(package=package)
+
+    harness.row.set_busy(True)
+
+    assert harness.row.action_stack.get_visible_child_name() == "spinner"
+    assert harness.row.action_spinner.get_spinning()
+    assert not harness.row.action_button.get_sensitive()
+
+    harness.row.action_button.emit("clicked")
+    assert harness.actions == []
+
+    harness.row.set_busy(False)
+
+    assert harness.row.action_stack.get_visible_child_name() == "icon"
+    assert not harness.row.action_spinner.get_spinning()
+    assert harness.row.action_button.get_sensitive()
+
+
+def test_item_busy_state_drives_the_bound_row() -> None:
+    item = PackageItem(make_package())
+    harness = Harness(item=item)
+
+    item.busy = True
+
+    assert harness.row.action_stack.get_visible_child_name() == "spinner"
+    assert not harness.row.action_button.get_sensitive()
+
+    item.busy = False
+
+    assert harness.row.action_stack.get_visible_child_name() == "icon"
+    assert harness.row.action_button.get_sensitive()
+
+
+def test_recycled_row_does_not_follow_the_old_item() -> None:
+    old_item = PackageItem(make_package())
+    harness = Harness(item=old_item)
+
+    harness.row.unbind()
+    old_item.busy = True
+
+    assert harness.row.action_stack.get_visible_child_name() == "icon"
+    assert not harness.row.action_spinner.get_spinning()
 
 
 def test_activating_the_row_expands_and_loads_the_detail() -> None:

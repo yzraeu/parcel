@@ -76,7 +76,12 @@ class ReposPage(Gtk.Box):
             title="No repositories",
             description="Add a COPR project or a repository URL to get started.",
         )
+        self.spinner = Gtk.Spinner()
+        self.spinner.set_size_request(32, 32)
+        self.busy_page = Adw.StatusPage(title="Loading repositories\u2026")
+        self.busy_page.set_child(self.spinner)
         self.stack = Gtk.Stack()
+        self.stack.add_named(self.busy_page, "busy")
         self.stack.add_named(self.scroller, "list")
         self.stack.add_named(self.empty_page, "empty")
         self.stack.set_vexpand(True)
@@ -134,11 +139,12 @@ class ReposPage(Gtk.Box):
 
     def _refresh(self) -> None:
         if self._loading and not self.rows:
-            self.empty_page.set_icon_name("content-loading-symbolic")
-            self.empty_page.set_title("Loading repositories\u2026")
-            self.empty_page.set_description("Reading the repository configuration.")
-            self.stack.set_visible_child_name("empty")
+            self.busy_page.set_title("Loading repositories\u2026")
+            self.busy_page.set_description("Reading the repository configuration.")
+            self.spinner.start()
+            self.stack.set_visible_child_name("busy")
             return
+        self.spinner.stop()
         if self.rows:
             self.stack.set_visible_child_name("list")
             return
